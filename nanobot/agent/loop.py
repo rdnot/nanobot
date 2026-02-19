@@ -183,10 +183,12 @@ class AgentLoop:
         iteration = 0
         final_content = None
         tools_used: list[str] = []
-
+        
+        FORCE_FINAL_THRESHOLD = max(1, self.max_iterations - 2)
+        
         while iteration < self.max_iterations:
             iteration += 1
-
+            
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
@@ -224,6 +226,14 @@ class AgentLoop:
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+                    if iteration >= FORCE_FINAL_THRESHOLD:
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                            "For research query, don't use any more tools. "
+                            "Provide your final answer now based on all the information gathered."
+                        )
+                    })
             else:
                 final_content = self._strip_think(response.content)
                 break

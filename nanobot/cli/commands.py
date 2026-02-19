@@ -700,7 +700,7 @@ def channels_login():
         env["BRIDGE_TOKEN"] = config.channels.whatsapp.bridge_token
     
     try:
-        subprocess.run(["npm", "start"], cwd=bridge_dir, check=True, env=env)
+        subprocess.run(["npm", "start"], cwd=bridge_dir, check=True, env=env, shell=True)
     except subprocess.CalledProcessError as e:
         console.print(f"[red]Bridge failed: {e}[/red]")
     except FileNotFoundError:

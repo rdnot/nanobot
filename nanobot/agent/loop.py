@@ -222,6 +222,19 @@ class AgentLoop:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
+
+    # ── Status message to user ────────────────────────
+                    if on_progress and tool_call.name in ("web_search", "web_fetch"):
+                        if tool_call.name == "web_search":
+                            status_text = f"Search: {tool_call.arguments.get('query', '...')}"
+                    else:
+                        status_text = f"Fetch: {tool_call.arguments.get('url', '...')}"
+                    try:
+                        await on_progress(status_text)
+                    except Exception as e:
+                        logger.warning(f"Failed to send status: {e}")
+    # ─────────────────────────────────────────────────
+                    
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result

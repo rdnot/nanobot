@@ -220,6 +220,7 @@ class ProvidersConfig(Base):
     minimax: ProviderConfig = Field(default_factory=ProviderConfig)
     aihubmix: ProviderConfig = Field(default_factory=ProviderConfig)  # AiHubMix API gateway
     siliconflow: ProviderConfig = Field(default_factory=ProviderConfig)  # SiliconFlow (硅基流动) API gateway
+    volcengine: ProviderConfig = Field(default_factory=ProviderConfig)  # VolcEngine (火山引擎) API gateway
     openai_codex: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenAI Codex (OAuth)
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
 
@@ -257,6 +258,7 @@ class MCPServerConfig(Base):
     args: list[str] = Field(default_factory=list)  # Stdio: command arguments
     env: dict[str, str] = Field(default_factory=dict)  # Stdio: extra env vars
     url: str = ""  # HTTP: streamable HTTP endpoint URL
+    headers: dict[str, str] = Field(default_factory=dict)  # HTTP: Custom HTTP Headers
 
 
 class ToolsConfig(Base):

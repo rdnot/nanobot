@@ -97,7 +97,7 @@ class WriteFileTool(Tool):
         try:
             if not path:
                 return "Error: 'path' argument is required. Please provide the full file path."
-            file_path = _resolve_path(path, self._workspace, self._allowed_dir)
+            file_path = _resolve_path(path, self._allowed_dir)
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content, encoding="utf-8")
             return f"Successfully wrote {len(content)} bytes to {file_path}"

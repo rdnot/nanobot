@@ -202,8 +202,11 @@ class AgentLoop:
                 # ── Custom: only send clean LLM text if non-empty ──
                 if on_progress:
                     clean = self._strip_think(response.content)
-                    if clean:  # only send if LLM actually said something
+                    if clean:
                         await on_progress(clean)
+                    # Only send tool hint for non-web tools (web tools use hardcoded Search:/Fetch: below)
+                    if not any(tc.name in ("web_search", "web_fetch") for tc in response.tool_calls):
+                        await on_progress(self._tool_hint(response.tool_calls))
 
                 tool_call_dicts = [
                     {

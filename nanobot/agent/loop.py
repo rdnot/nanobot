@@ -202,6 +202,7 @@ class AgentLoop:
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        text_only_retried = False
         
         FORCE_FINAL_THRESHOLD = max(1, self.max_iterations - 2)
         
@@ -245,7 +246,7 @@ class AgentLoop:
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                    logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
+                    logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
 
                     if on_progress and tool_call.name in ("web_search", "web_fetch"):
                         if tool_call.name == "web_search":

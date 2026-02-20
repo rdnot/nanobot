@@ -361,9 +361,24 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content="🐈 Session cleared (no memory consolidation).",
             )
+
+        if cmd == "/rerun":
+            import subprocess
+            rerun_bat = self.workspace / "rerun.bat"
+            if not rerun_bat.exists():
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                              content="❌ rerun.bat not found in workspace.")
+            try:
+                subprocess.Popen(str(rerun_bat), shell=True, cwd=str(self.workspace))
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                              content="✅ rerun.bat started.")
+            except Exception as e:
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                              content=f"❌ Failed to run rerun.bat: {e}")
+        
         if cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="🐈 nanobot commands:\n/new — Start a new conversation\n/c  — Clear session instantly (no memory saved)\n/help — Show available commands")
+                                  content="🐈 nanobot commands:\n/new — Start a new conversation\n/c  — Clear session instantly (no memory saved)\n/rerun — Run rerun.bat in workspace\n/help — Show available commands")
         
         if len(session.messages) > self.memory_window and session.key not in self._consolidating:
             self._consolidating.add(session.key)

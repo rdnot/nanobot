@@ -228,7 +228,7 @@ class AgentLoop:
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                    llogger.info("Tool call: {}({})", tool_call.name, args_str[:200])
+                    logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
 
                     if on_progress and tool_call.name in ("web_search", "web_fetch"):
                         if tool_call.name == "web_search":

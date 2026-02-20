@@ -11,7 +11,32 @@ from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import DiscordConfig
 DISCORD_API_BASE = "https://discord.com/api/v10"
-MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024 # 20MB
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # 20MB
+MAX_MESSAGE_LEN = 2000  # Discord message character limit
+
+
+def _split_message(content: str, max_len: int = MAX_MESSAGE_LEN) -> list[str]:
+    """Split content into chunks within max_len, preferring line breaks."""
+    if not content:
+        return []
+    if len(content) <= max_len:
+        return [content]
+    chunks: list[str] = []
+    while content:
+        if len(content) <= max_len:
+            chunks.append(content)
+            break
+        cut = content[:max_len]
+        pos = cut.rfind('\n')
+        if pos <= 0:
+            pos = cut.rfind(' ')
+        if pos <= 0:
+            pos = max_len
+        chunks.append(content[:pos])
+        content = content[pos:].lstrip()
+    return chunks
+
+
 class DiscordChannel(BaseChannel):
     """Discord channel using Gateway websocket."""
     name = "discord"
@@ -66,36 +91,46 @@ class DiscordChannel(BaseChannel):
         url = f"{DISCORD_API_BASE}/channels/{msg.chat_id}/messages"
         headers = {"Authorization": f"Bot {self.config.token}"}
 
-        MAX_LEN = 1900
-        content = msg.content or ""
-        chunks = [content[i:i + MAX_LEN] for i in range(0, len(content), MAX_LEN)] if content else [""]
-
         try:
-            for idx, chunk in enumerate(chunks):
+            chunks = _split_message(msg.content or "")
+            if not chunks:
+                return
+
+            for i, chunk in enumerate(chunks):
                 payload: dict[str, Any] = {"content": chunk}
 
-                if idx == 0 and msg.reply_to:
+                # Only set reply reference on the first chunk
+                if i == 0 and msg.reply_to:
                     payload["message_reference"] = {"message_id": msg.reply_to}
                     payload["allowed_mentions"] = {"replied_user": False}
 
-                for attempt in range(3):
-                    try:
-                        response = await self._http.post(url, headers=headers, json=payload)
-                        if response.status_code == 429:
-                            data = response.json()
-                            retry_after = float(data.get("retry_after", 1.0))
-                            logger.warning(f"Discord rate limited, retrying in {retry_after}s")
-                            await asyncio.sleep(retry_after)
-                            continue
-                        response.raise_for_status()
-                        break
-                    except Exception as e:
-                        if attempt == 2:
-                            logger.error(f"Error sending Discord message: {e}")
-                        else:
-                            await asyncio.sleep(1)
+                if not await self._send_payload(url, headers, payload):
+                    break  # Abort remaining chunks on failure
         finally:
             await self._stop_typing(msg.chat_id)
+
+    async def _send_payload(
+        self, url: str, headers: dict[str, str], payload: dict[str, Any]
+    ) -> bool:
+        """Send a single Discord API payload with retry on rate-limit. Returns True on success."""
+        for attempt in range(3):
+            try:
+                response = await self._http.post(url, headers=headers, json=payload)
+                if response.status_code == 429:
+                    data = response.json()
+                    retry_after = float(data.get("retry_after", 1.0))
+                    logger.warning("Discord rate limited, retrying in {}s", retry_after)
+                    await asyncio.sleep(retry_after)
+                    continue
+                response.raise_for_status()
+                return True
+            except Exception as e:
+                if attempt == 2:
+                    logger.error("Error sending Discord message: {}", e)
+                else:
+                    await asyncio.sleep(1)
+        return False
+
     async def _gateway_loop(self) -> None:
         """Main gateway loop: identify, heartbeat, dispatch events."""
         if not self._ws:

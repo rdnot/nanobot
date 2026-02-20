@@ -200,7 +200,8 @@ class AgentLoop:
             if response.has_tool_calls:
                 if on_progress:
                     clean = self._strip_think(response.content)
-                    await on_progress(clean)
+                    if clean:  # only send if LLM actually said something
+                        await on_progress(clean)
 
                 tool_call_dicts = [
                     {
@@ -223,17 +224,18 @@ class AgentLoop:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
 
-    # ── Status message to user ────────────────────────
                     if on_progress and tool_call.name in ("web_search", "web_fetch"):
                         if tool_call.name == "web_search":
-                            status_text = f"Search: {tool_call.arguments.get('query', '...')}"
-                    else:
-                        status_text = f"Fetch: {tool_call.arguments.get('url', '...')}"
-                    try:
-                        await on_progress(status_text)
-                    except Exception as e:
-                        logger.warning(f"Failed to send status: {e}")
-    # ─────────────────────────────────────────────────
+                            val = tool_call.arguments.get("query", "").strip()
+                        else:
+                            val = tool_call.arguments.get("url", "").strip()
+                        if val:  # only send if non-empty
+                            status_text = f"Search: {val}" if tool_call.name == "web_search" else f"Fetch: {val[:60]}"
+                            try:
+                                await on_progress(status_text)
+                            except Exception as e:
+                                logger.warning(f"Failed to send status: {e}")
+
                     
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(

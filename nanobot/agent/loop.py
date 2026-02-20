@@ -186,6 +186,9 @@ class AgentLoop:
         tools_used: list[str] = []
         text_only_retried = False
 
+        # ── Custom: nudge LLM to stop using tools near iteration ceiling ──
+        FORCE_FINAL_THRESHOLD = max(1, self.max_iterations - 2)
+
         while iteration < self.max_iterations:
             iteration += 1
 
@@ -198,9 +201,11 @@ class AgentLoop:
             )
 
             if response.has_tool_calls:
+                # ── Custom: only send clean LLM text if non-empty ──
                 if on_progress:
                     clean = self._strip_think(response.content)
-                    await on_progress(clean or self._tool_hint(response.tool_calls))
+                    if clean:
+                        await on_progress(clean)
 
                 tool_call_dicts = [
                     {
@@ -222,10 +227,34 @@ class AgentLoop:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
+
+                    # ── Custom: hardcoded status messages for slow web tools ──
+                    if on_progress and tool_call.name in ("web_search", "web_fetch"):
+                        if tool_call.name == "web_search":
+                            val = tool_call.arguments.get("query", "").strip()
+                        else:
+                            val = tool_call.arguments.get("url", "").strip()
+                        if val:
+                            status_text = f"Search: {val}" if tool_call.name == "web_search" else f"Fetch: {val[:60]}"
+                            try:
+                                await on_progress(status_text)
+                            except Exception as e:
+                                logger.warning("Failed to send status: {}", e)
+
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+
+                    # ── Custom: nudge LLM to finalize near iteration ceiling ──
+                    if iteration >= FORCE_FINAL_THRESHOLD:
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "For research query, don't use any more tools. "
+                                "Provide your final answer now based on all the information gathered."
+                            )
+                        })
             else:
                 final_content = self._strip_think(response.content)
                 # Some models send an interim text response before tool calls.
@@ -327,9 +356,21 @@ class AgentLoop:
             asyncio.create_task(_consolidate_and_cleanup())
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started. Memory consolidation in progress.")
+
+        # ── Custom: /c command — clear session without memory consolidation ──
+        if cmd == "/c":
+            session.clear()
+            self.sessions.save(session)
+            self.sessions.invalidate(session.key)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="🐈 Session cleared (no memory consolidation).",
+            )
+
         if cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="🐈 nanobot commands:\n/new — Start a new conversation\n/help — Show available commands")
+                                  content="🐈 nanobot commands:\n/new — Start a new conversation\n/c  — Clear session instantly (no memory saved)\n/help — Show available commands")
         
         if len(session.messages) > self.memory_window and session.key not in self._consolidating:
             self._consolidating.add(session.key)
@@ -376,7 +417,7 @@ class AgentLoop:
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=final_content,
-            metadata=msg.metadata or {},  # Pass through for channel-specific needs (e.g. Slack thread_ts)
+            metadata=msg.metadata or {},
         )
     
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:

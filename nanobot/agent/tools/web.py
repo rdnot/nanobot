@@ -43,6 +43,25 @@ def _validate_url(url: str) -> tuple[bool, str]:
         return False, str(e)
 
 
+# ← ADD: PDF extraction helper
+def _extract_pdf_text(pdf_data: bytes) -> str:
+    """Extract text from PDF using PyMuPDF."""
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(stream=pdf_data, filetype="pdf")
+        text_lines = []
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            text = page.get_text()
+            text_lines.append(f"--- Page {page_num + 1} ---\n{text}")
+        doc.close()
+        return "\n".join(text_lines)
+    except ImportError:
+        return "Error: PyMuPDF (fitz) not installed. Install with: pip install PyMuPDF"
+    except Exception as e:
+        return f"Error extracting PDF: {e}"
+
+
 class WebSearchTool(Tool):
     """Search the web using Brave Search API."""
     
@@ -99,19 +118,18 @@ class WebFetchTool(Tool):
         "type": "object",
         "properties": {
             "url": {"type": "string", "description": "URL to fetch"},
-            "extractMode": {"type": "string", "enum": ["markdown", "text"], "default": "markdown"},
-            "maxChars": {"type": "integer", "minimum": 100}
+            "extractMode": {"type": "string", "enum": ["markdown", "text"], "default": "markdown"}
         },
         "required": ["url"]
     }
     
-    def __init__(self, max_chars: int = 50000):
+    def __init__(self, max_chars: int = 200000):  # ← CHANGE: 50000 → 200000
         self.max_chars = max_chars
     
-    async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None, **kwargs: Any) -> str:
+    async def execute(self, url: str, extractMode: str = "markdown", **kwargs: Any) -> str:
         from readability import Document
 
-        max_chars = maxChars or self.max_chars
+        max_chars = self.max_chars
 
         # Validate URL before fetching
         is_valid, error_msg = _validate_url(url)
@@ -129,8 +147,16 @@ class WebFetchTool(Tool):
             
             ctype = r.headers.get("content-type", "")
             
+            # ← ADD: PDF support
+            if "application/pdf" in ctype:
+                text = _extract_pdf_text(r.content)
+                truncated = len(text) > max_chars
+                if truncated:
+                    text = text[:max_chars]
+                return json.dumps({"url": url, "finalUrl": str(r.url), "status": r.status_code,
+                                  "extractor": "pymupdf", "truncated": truncated, "length": len(text), "text": text}, ensure_ascii=False)
             # JSON
-            if "application/json" in ctype:
+            elif "application/json" in ctype:
                 text, extractor = json.dumps(r.json(), indent=2, ensure_ascii=False), "json"
             # HTML
             elif "text/html" in ctype or r.text[:256].lower().startswith(("<!doctype", "<html")):

@@ -252,8 +252,11 @@ class DiscordChannel(BaseChannel):
             while self._running:
                 try:
                     await self._http.post(url, headers=headers)
-                except Exception:
-                    pass
+                except asyncio.CancelledError:
+                    return
+                except Exception as e:
+                    logger.debug("Discord typing indicator failed for {}: {}", channel_id, e)
+                    return
                 await asyncio.sleep(8)
         self._typing_tasks[channel_id] = asyncio.create_task(typing_loop())
     async def _stop_typing(self, channel_id: str) -> None:

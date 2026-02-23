@@ -489,6 +489,13 @@ class AgentLoop:
 
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
+                # Agent used message tool to send its answer — still send tools summary
+                if tool_calls_log:
+                    tools_summary = self._build_tools_summary(tool_calls_log)
+                    await self.bus.publish_outbound(OutboundMessage(
+                        channel=msg.channel, chat_id=msg.chat_id, content=tools_summary,
+                        metadata={**(msg.metadata or {}), "_tools_summary": True},
+                    ))
                 return None
 
         # Send final answer first

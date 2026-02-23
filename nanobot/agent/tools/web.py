@@ -7,13 +7,11 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
-import httpx
-
 from nanobot.agent.tools.base import Tool
 
 # Shared constants
-USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
-MAX_REDIRECTS = 5  # Limit redirects to prevent DoS attacks
+USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+MAX_REDIRECTS = 5
 
 
 def _strip_tags(text: str) -> str:
@@ -43,7 +41,20 @@ def _validate_url(url: str) -> tuple[bool, str]:
         return False, str(e)
 
 
-# ← ADD: PDF extraction helper
+def _smart_truncate(text: str, max_chars: int) -> str:
+    """Truncate at paragraph boundary instead of mid-sentence."""
+    if len(text) <= max_chars:
+        return text
+    cutoff = text[:max_chars].rfind('\n\n')
+    if cutoff > max_chars * 0.8:  # only use paragraph break if it's not too far back
+        return text[:cutoff] + "\n\n[...truncated...]"
+    # fallback: cut at last sentence
+    cutoff = text[:max_chars].rfind('. ')
+    if cutoff > max_chars * 0.8:
+        return text[:cutoff + 1] + " [...truncated...]"
+    return text[:max_chars] + " [...truncated...]"
+
+
 def _extract_pdf_text(pdf_data: bytes) -> str:
     """Extract text from PDF using PyMuPDF."""
     try:
@@ -62,9 +73,126 @@ def _extract_pdf_text(pdf_data: bytes) -> str:
         return f"Error extracting PDF: {e}"
 
 
+def _extract_meta(raw_html: str) -> dict[str, str]:
+    """Extract useful meta tags: author, date, description, og fields."""
+    meta: dict[str, str] = {}
+    patterns = [
+        (r'<meta\s+name=["\']author["\']\s+content=["\']([^"\']+)["\']', 'author'),
+        (r'<meta\s+property=["\']article:author["\']\s+content=["\']([^"\']+)["\']', 'author'),
+        (r'<meta\s+property=["\']article:published_time["\']\s+content=["\']([^"\']+)["\']', 'published'),
+        (r'<meta\s+name=["\']publication_date["\']\s+content=["\']([^"\']+)["\']', 'published'),
+        (r'<meta\s+name=["\']description["\']\s+content=["\']([^"\']+)["\']', 'description'),
+        (r'<meta\s+property=["\']og:description["\']\s+content=["\']([^"\']+)["\']', 'description'),
+        (r'<meta\s+property=["\']og:site_name["\']\s+content=["\']([^"\']+)["\']', 'site_name'),
+    ]
+    for pattern, key in patterns:
+        if key not in meta:
+            m = re.search(pattern, raw_html, re.I)
+            if m:
+                meta[key] = html.unescape(m.group(1).strip())
+    return meta
+
+
+async def _fetch_raw(url: str) -> tuple[bytes, dict, int, str]:
+    """
+    Fetch URL bytes. Tries curl_cffi (Chrome impersonation) first,
+    falls back to httpx if curl_cffi is not installed or fails.
+    Returns (content_bytes, headers_dict, status_code, fetcher_name)
+    """
+    # --- Primary: curl_cffi (bypasses Cloudflare, TLS fingerprinting) ---
+    try:
+        from curl_cffi.requests import AsyncSession
+        async with AsyncSession() as session:
+            r = await session.get(
+                url,
+                impersonate="chrome120",
+                headers={"User-Agent": USER_AGENT},
+                allow_redirects=True,
+                max_redirects=MAX_REDIRECTS,
+                timeout=30,
+            )
+            return r.content, dict(r.headers), r.status_code, "curl_cffi"
+    except ImportError:
+        pass  # curl_cffi not installed, fall through
+    except Exception:
+        pass  # curl_cffi failed (e.g. connection error), fall through to httpx
+
+    # --- Fallback: httpx ---
+    import httpx
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        max_redirects=MAX_REDIRECTS,
+        timeout=30.0,
+    ) as client:
+        r = await client.get(url, headers={"User-Agent": USER_AGENT})
+        r.raise_for_status()
+        return r.content, dict(r.headers), r.status_code, "httpx"
+
+
+def _html_to_text(raw_html: str, extract_mode: str = "markdown") -> tuple[str, str]:
+    """
+    Extract main content from HTML.
+    Tries trafilatura first (best for articles), falls back to readability.
+    Returns (text, extractor_name)
+    """
+    # --- Primary: trafilatura ---
+    try:
+        import trafilatura
+        result = trafilatura.extract(
+            raw_html,
+            include_tables=True,
+            include_images=False,
+            include_links=(extract_mode == "markdown"),
+            output_format="markdown" if extract_mode == "markdown" else "txt",
+            with_metadata=False,
+        )
+        if result and len(result.strip()) > 200:  # only accept if substantial content
+            return result, "trafilatura"
+    except ImportError:
+        pass
+
+    # --- Fallback: readability + conversion ---
+    try:
+        from readability import Document
+        doc = Document(raw_html)
+        summary = doc.summary()
+        if extract_mode == "markdown":
+            content = _readability_to_markdown(summary)
+        else:
+            content = _strip_tags(summary)
+        title = doc.title() or ""
+        text = f"# {title}\n\n{content}" if title else content
+        return text, "readability"
+    except Exception:
+        pass
+
+    # --- Last resort: strip tags ---
+    return _normalize(_strip_tags(raw_html)), "strip_tags"
+
+
+def _readability_to_markdown(raw_html: str) -> str:
+    """Convert readability HTML output to markdown."""
+    # Try markdownify first
+    try:
+        from markdownify import markdownify as md
+        return _normalize(md(raw_html, heading_style="ATX", strip=['a'] if False else []))
+    except ImportError:
+        pass
+
+    # Manual fallback (original logic)
+    text = re.sub(r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>([\s\S]*?)</a>',
+                  lambda m: f'[{_strip_tags(m[2])}]({m[1]})', raw_html, flags=re.I)
+    text = re.sub(r'<h([1-6])[^>]*>([\s\S]*?)</h\1>',
+                  lambda m: f'\n{"#" * int(m[1])} {_strip_tags(m[2])}\n', text, flags=re.I)
+    text = re.sub(r'<li[^>]*>([\s\S]*?)</li>', lambda m: f'\n- {_strip_tags(m[1])}', text, flags=re.I)
+    text = re.sub(r'</(p|div|section|article)>', '\n\n', text, flags=re.I)
+    text = re.sub(r'<(br|hr)\s*/?>', '\n', text, flags=re.I)
+    return _normalize(_strip_tags(text))
+
+
 class WebSearchTool(Tool):
     """Search the web using Brave Search API."""
-    
+
     name = "web_search"
     description = "Search the web. Returns titles, URLs, and snippets."
     parameters = {
@@ -75,16 +203,17 @@ class WebSearchTool(Tool):
         },
         "required": ["query"]
     }
-    
+
     def __init__(self, api_key: str | None = None, max_results: int = 5):
         self.api_key = api_key or os.environ.get("BRAVE_API_KEY", "")
         self.max_results = max_results
-    
+
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
         if not self.api_key:
             return "Error: BRAVE_API_KEY not configured"
-        
+
         try:
+            import httpx
             n = min(max(count or self.max_results, 1), 10)
             async with httpx.AsyncClient() as client:
                 r = await client.get(
@@ -94,24 +223,31 @@ class WebSearchTool(Tool):
                     timeout=10.0
                 )
                 r.raise_for_status()
-            
+
             results = r.json().get("web", {}).get("results", [])
             if not results:
                 return f"No results for: {query}"
-            
+
             lines = [f"Results for: {query}\n"]
             for i, item in enumerate(results[:n], 1):
                 lines.append(f"{i}. {item.get('title', '')}\n   {item.get('url', '')}")
                 if desc := item.get("description"):
                     lines.append(f"   {desc}")
+                if age := item.get("age"):
+                    lines.append(f"   Published: {age}")
             return "\n".join(lines)
         except Exception as e:
             return f"Error: {e}"
 
 
 class WebFetchTool(Tool):
-    """Fetch and extract content from a URL using Readability."""
-    
+    """
+    Fetch and extract content from a URL.
+
+    Fetcher priority:  curl_cffi (Chrome impersonation) → httpx
+    Extractor priority: trafilatura → readability → strip_tags
+    """
+
     name = "web_fetch"
     description = "Fetch URL and extract readable content (HTML → markdown/text)."
     parameters = {
@@ -122,68 +258,84 @@ class WebFetchTool(Tool):
         },
         "required": ["url"]
     }
-    
-    def __init__(self, max_chars: int = 200000):  # ← CHANGE: 50000 → 200000
+
+    def __init__(self, max_chars: int = 200000):
         self.max_chars = max_chars
-    
+        self._cache: dict[str, str] = {}  # session-level URL cache
+
     async def execute(self, url: str, extractMode: str = "markdown", **kwargs: Any) -> str:
-        from readability import Document
-
-        max_chars = self.max_chars
-
-        # Validate URL before fetching
+        # Validate
         is_valid, error_msg = _validate_url(url)
         if not is_valid:
             return json.dumps({"error": f"URL validation failed: {error_msg}", "url": url}, ensure_ascii=False)
 
+        # Cache hit
+        cache_key = f"{url}::{extractMode}"
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
         try:
-            async with httpx.AsyncClient(
-                follow_redirects=True,
-                max_redirects=MAX_REDIRECTS,
-                timeout=30.0
-            ) as client:
-                r = await client.get(url, headers={"User-Agent": USER_AGENT})
-                r.raise_for_status()
-            
-            ctype = r.headers.get("content-type", "")
-            
-            # ← ADD: PDF support
-            if "application/pdf" in ctype:
-                text = _extract_pdf_text(r.content)
-                truncated = len(text) > max_chars
-                if truncated:
-                    text = text[:max_chars]
-                return json.dumps({"url": url, "finalUrl": str(r.url), "status": r.status_code,
-                                  "extractor": "pymupdf", "truncated": truncated, "length": len(text), "text": text}, ensure_ascii=False)
-            # JSON
+            content_bytes, headers, status_code, fetcher = await _fetch_raw(url)
+            ctype = headers.get("content-type", "").lower()
+
+            # --- PDF ---
+            if "application/pdf" in ctype or url.lower().endswith(".pdf"):
+                text = _extract_pdf_text(content_bytes)
+                text = _smart_truncate(text, self.max_chars)
+                result = json.dumps({
+                    "url": url, "status": status_code, "fetcher": fetcher,
+                    "extractor": "pymupdf", "truncated": "[...truncated...]" in text,
+                    "word_count": len(text.split()), "length": len(text), "text": text
+                }, ensure_ascii=False)
+
+            # --- JSON ---
             elif "application/json" in ctype:
-                text, extractor = json.dumps(r.json(), indent=2, ensure_ascii=False), "json"
-            # HTML
-            elif "text/html" in ctype or r.text[:256].lower().startswith(("<!doctype", "<html")):
-                doc = Document(r.text)
-                content = self._to_markdown(doc.summary()) if extractMode == "markdown" else _strip_tags(doc.summary())
-                text = f"# {doc.title()}\n\n{content}" if doc.title() else content
-                extractor = "readability"
+                text = json.dumps(json.loads(content_bytes), indent=2, ensure_ascii=False)
+                text = _smart_truncate(text, self.max_chars)
+                result = json.dumps({
+                    "url": url, "status": status_code, "fetcher": fetcher,
+                    "extractor": "json", "truncated": "[...truncated...]" in text,
+                    "word_count": len(text.split()), "length": len(text), "text": text
+                }, ensure_ascii=False)
+
+            # --- HTML ---
+            elif "text/html" in ctype or content_bytes[:256].lower().startswith((b"<!doctype", b"<html")):
+                raw_html = content_bytes.decode("utf-8", errors="replace")
+                meta = _extract_meta(raw_html)
+                text, extractor = _html_to_text(raw_html, extractMode)
+                text = _smart_truncate(text, self.max_chars)
+                result = json.dumps({
+                    "url": url, "status": status_code, "fetcher": fetcher,
+                    "extractor": extractor, "truncated": "[...truncated...]" in text,
+                    "word_count": len(text.split()), "length": len(text),
+                    "meta": meta, "text": text
+                }, ensure_ascii=False)
+
+            # --- XML (PubMed, RSS, etc.) ---
+            elif "xml" in ctype:
+                text = content_bytes.decode("utf-8", errors="replace")
+                # Strip XML tags but preserve structure hints
+                text = re.sub(r'<\?xml[^>]+\?>', '', text)
+                text = _normalize(_strip_tags(text))
+                text = _smart_truncate(text, self.max_chars)
+                result = json.dumps({
+                    "url": url, "status": status_code, "fetcher": fetcher,
+                    "extractor": "xml", "truncated": "[...truncated...]" in text,
+                    "word_count": len(text.split()), "length": len(text), "text": text
+                }, ensure_ascii=False)
+
+            # --- Raw fallback ---
             else:
-                text, extractor = r.text, "raw"
-            
-            truncated = len(text) > max_chars
-            if truncated:
-                text = text[:max_chars]
-            
-            return json.dumps({"url": url, "finalUrl": str(r.url), "status": r.status_code,
-                              "extractor": extractor, "truncated": truncated, "length": len(text), "text": text}, ensure_ascii=False)
+                text = content_bytes.decode("utf-8", errors="replace")
+                text = _smart_truncate(text, self.max_chars)
+                result = json.dumps({
+                    "url": url, "status": status_code, "fetcher": fetcher,
+                    "extractor": "raw", "truncated": "[...truncated...]" in text,
+                    "word_count": len(text.split()), "length": len(text), "text": text
+                }, ensure_ascii=False)
+
+            self._cache[cache_key] = result
+            return result
+
         except Exception as e:
             return json.dumps({"error": str(e), "url": url}, ensure_ascii=False)
-    
-    def _to_markdown(self, html: str) -> str:
-        """Convert HTML to markdown."""
-        # Convert links, headings, lists before stripping tags
-        text = re.sub(r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>([\s\S]*?)</a>',
-                      lambda m: f'[{_strip_tags(m[2])}]({m[1]})', html, flags=re.I)
-        text = re.sub(r'<h([1-6])[^>]*>([\s\S]*?)</h\1>',
-                      lambda m: f'\n{"#" * int(m[1])} {_strip_tags(m[2])}\n', text, flags=re.I)
-        text = re.sub(r'<li[^>]*>([\s\S]*?)</li>', lambda m: f'\n- {_strip_tags(m[1])}', text, flags=re.I)
-        text = re.sub(r'</(p|div|section|article)>', '\n\n', text, flags=re.I)
-        text = re.sub(r'<(br|hr)\s*/?>', '\n', text, flags=re.I)
-        return _normalize(_strip_tags(text))

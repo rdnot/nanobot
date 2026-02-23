@@ -165,22 +165,61 @@ class AgentLoop:
     def _tool_hint(tool_calls: list) -> str:
         """Format tool calls as concise hint, e.g. 'web_search("query")'."""
         def _fmt(tc):
-            val = next(iter(tc.arguments.values()), None) if tc.arguments else None
-            if not isinstance(val, str):
-                return tc.name
-            return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
+            if tc.name == "web_search":
+                # Only show the query words
+                val = tc.arguments.get("query", "") if tc.arguments else ""
+                val = val[:40] + "…" if len(val) > 40 else val
+                return f'web_search({val})'
+            elif tc.name in ("web_fetch", "fetch"):
+                # Show full URL only
+                url = tc.arguments.get("url", "") if tc.arguments else ""
+                return f'fetch("{url}")'
+            else:
+                val = next(iter(tc.arguments.values()), None) if tc.arguments else None
+                if not isinstance(val, str):
+                    return tc.name
+                val = val[:40] + "…" if len(val) > 40 else val
+                return f'{tc.name}({val})'
         return ", ".join(_fmt(tc) for tc in tool_calls)
+
+    @staticmethod
+    def _build_tools_summary(all_tool_calls: list[dict]) -> str:
+        """Build a separate 'Tools used' message from accumulated tool call records."""
+        if not all_tool_calls:
+            return ""
+        lines = ["**Tools used:**"]
+        for item in all_tool_calls:
+            name = item.get("name", "")
+            args = item.get("arguments", {})
+            if name == "web_search":
+                query = args.get("query", "")
+                lines.append(f"- search({query})")
+            elif name in ("web_fetch", "fetch"):
+                url = args.get("url", "")
+                lines.append(f'- fetch("{url}")')
+            elif name in ("read_file",):
+                path = args.get("path", next(iter(args.values()), "***") if args else "***")
+                lines.append(f"- read_file({path})")
+            else:
+                val = next(iter(args.values()), "") if args else ""
+                if isinstance(val, str):
+                    val = val[:60] + "…" if len(val) > 60 else val
+                    lines.append(f"- {name}({val})")
+                else:
+                    lines.append(f"- {name}(...)")
+        return "\n".join(lines)
 
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
-    ) -> tuple[str | None, list[str], list[dict]]:
+    ) -> tuple[str | None, list[str], list[dict], list[dict]]:
         """Run the agent iteration loop. Returns (final_content, tools_used, messages)."""
         messages = initial_messages
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        all_tool_calls_log: list[dict] = []  # Accumulate all tool calls for summary message
         text_only_retried = False
         
         FORCE_FINAL_THRESHOLD = max(1, self.max_iterations - 2)
@@ -221,6 +260,7 @@ class AgentLoop:
 
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
+                    all_tool_calls_log.append({"name": tool_call.name, "arguments": tool_call.arguments or {}})
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])                                   
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
@@ -246,7 +286,7 @@ class AgentLoop:
                 "without completing the task. You can try breaking the task into smaller steps."
             )
 
-        return final_content, tools_used, messages
+        return final_content, tools_used, messages, all_tool_calls_log
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -324,7 +364,7 @@ class AgentLoop:
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
-            final_content, _, all_msgs = await self._run_agent_loop(messages)
+            final_content, _, all_msgs, _ = await self._run_agent_loop(messages)
             self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
             return OutboundMessage(channel=channel, chat_id=chat_id,
@@ -434,7 +474,7 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
-        final_content, _, all_msgs = await self._run_agent_loop(
+        final_content, _, all_msgs, tool_calls_log = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
         )
 
@@ -451,10 +491,22 @@ class AgentLoop:
             if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
                 return None
 
-        return OutboundMessage(
+        # Send final answer first
+        main_response = OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=final_content,
             metadata=msg.metadata or {},
         )
+
+        # Then send tools-used summary as a separate message (if any tools were used)
+        if tool_calls_log:
+            tools_summary = self._build_tools_summary(tool_calls_log)
+            await self.bus.publish_outbound(main_response)
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content=tools_summary,
+                metadata={**(msg.metadata or {}), "_tools_summary": True},
+            )
+
+        return main_response
 
     _TOOL_RESULT_MAX_CHARS = 500
 

@@ -105,8 +105,7 @@ async def _fetch_raw(url: str) -> tuple[bytes, dict, int, str]:
         async with AsyncSession() as session:
             r = await session.get(
                 url,
-                impersonate="chrome120",
-                headers={"User-Agent": USER_AGENT},
+                impersonate="chrome",
                 allow_redirects=True,
                 max_redirects=MAX_REDIRECTS,
                 timeout=30,

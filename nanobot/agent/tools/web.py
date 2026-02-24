@@ -12,6 +12,7 @@ from nanobot.agent.tools.base import Tool
 # Shared constants
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 MAX_REDIRECTS = 5
+DEFAULT_SEARXNG_URL = ""  # Local SearXNG instance eg. http://localhost:8888
 
 
 def _strip_tags(text: str) -> str:
@@ -46,9 +47,8 @@ def _smart_truncate(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     cutoff = text[:max_chars].rfind('\n\n')
-    if cutoff > max_chars * 0.8:  # only use paragraph break if it's not too far back
+    if cutoff > max_chars * 0.8:
         return text[:cutoff] + "\n\n[...truncated...]"
-    # fallback: cut at last sentence
     cutoff = text[:max_chars].rfind('. ')
     if cutoff > max_chars * 0.8:
         return text[:cutoff + 1] + " [...truncated...]"
@@ -115,7 +115,7 @@ async def _fetch_raw(url: str) -> tuple[bytes, dict, int, str]:
     except ImportError:
         pass  # curl_cffi not installed, fall through
     except Exception:
-        pass  # curl_cffi failed (e.g. connection error), fall through to httpx
+        pass  # curl_cffi failed, fall through to httpx
 
     # --- Fallback: httpx ---
     import httpx
@@ -146,12 +146,12 @@ def _html_to_text(raw_html: str, extract_mode: str = "markdown") -> tuple[str, s
             output_format="markdown" if extract_mode == "markdown" else "txt",
             with_metadata=False,
         )
-        if result and len(result.strip()) > 200:  # only accept if substantial content
+        if result and len(result.strip()) > 200:
             return result, "trafilatura"
     except ImportError:
         pass
 
-    # --- Fallback: readability + conversion ---
+    # --- Fallback: readability ---
     try:
         from readability import Document
         doc = Document(raw_html)
@@ -191,7 +191,7 @@ def _readability_to_markdown(raw_html: str) -> str:
 
 
 class WebSearchTool(Tool):
-    """Search the web using Brave Search API."""
+    """Search the web using local SearXNG (with Brave fallback)."""
 
     name = "web_search"
     description = "Search the web. Returns titles, URLs, and snippets."
@@ -206,6 +206,7 @@ class WebSearchTool(Tool):
 
     def __init__(self, api_key: str | None = None, max_results: int = 5):
         self._init_api_key = api_key
+        self.searxng_url = os.environ.get("SEARXNG_URL", DEFAULT_SEARXNG_URL)
         self.max_results = max_results
 
     @property
@@ -214,13 +215,66 @@ class WebSearchTool(Tool):
         return self._init_api_key or os.environ.get("BRAVE_API_KEY", "")
 
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
+        # Try local SearXNG first
+        if self.searxng_url:
+            try:
+                result = await self._search_searxng(query, count)
+                if not result.startswith("Error"):
+                    return result
+                else:
+                    # SearXNG returned an error, falling back to Brave
+                    print(f" DEBUG: SearXNG search failed with error, falling back to Brave API")
+            except Exception as e:
+                # SearXNG threw an exception, falling back to Brave
+                print(f" DEBUG: SearXNG search threw exception, falling back to Brave API")
+        else:
+            pass
+
+        # Fallback to Brave
+        return await self._search_brave(query, count)
+
+    async def _search_searxng(self, query: str, count: int | None = None) -> str:
+        """Search using local SearXNG instance."""
+        import httpx
+        n = min(max(count or self.max_results, 1), 10)
+
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.get(
+                    f"{self.searxng_url.rstrip('/')}/search",
+                    params={"q": query, "format": "json"},
+                    headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+                    timeout=10.0
+                )
+                r.raise_for_status()
+
+            data = r.json()
+            results = data.get("results", [])
+
+            if not results:
+                return f"No results for: {query}"
+
+            lines = [f"Results for: {query}\n"]
+            for i, item in enumerate(results[:n], 1):
+                lines.append(f"{i}. {item.get('title', '')}\n   {item.get('url', '')}")
+                if content := item.get("content"):
+                    lines.append(f"   {content}")
+                if published := item.get("publishedDate"):
+                    lines.append(f"   Published: {published}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error: {e}"
+
+    async def _search_brave(self, query: str, count: int | None = None) -> str:
+        """Search using Brave Search API."""
+        
         if not self.api_key:
             return (
                 "Error: Brave Search API key not configured. "
                 "Set it in ~/.nanobot/config.json under tools.web.search.apiKey "
                 "(or export BRAVE_API_KEY), then restart the gateway."
             )
-        
+
         try:
             import httpx
             n = min(max(count or self.max_results, 1), 10)
@@ -320,10 +374,9 @@ class WebFetchTool(Tool):
                     "meta": meta, "text": text
                 }, ensure_ascii=False)
 
-            # --- XML (PubMed, RSS, etc.) ---
+            # --- XML (PubMed, RSS, SearXNG, etc.) ---
             elif "xml" in ctype:
                 text = content_bytes.decode("utf-8", errors="replace")
-                # Strip XML tags but preserve structure hints
                 text = re.sub(r'<\?xml[^>]+\?>', '', text)
                 text = _normalize(_strip_tags(text))
                 text = _smart_truncate(text, self.max_chars)

@@ -9,6 +9,13 @@ from urllib.parse import urlparse
 
 from nanobot.agent.tools.base import Tool
 
+# Scrapling availability check (async browser tier)
+try:
+    from scrapling.fetchers import AsyncStealthySession
+    SCRAPLING_AVAILABLE = True
+except ImportError:
+    SCRAPLING_AVAILABLE = False
+
 # Shared constants
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 MAX_REDIRECTS = 5
@@ -93,39 +100,151 @@ def _extract_meta(raw_html: str) -> dict[str, str]:
     return meta
 
 
+def _is_content_sufficient(content_bytes: bytes, url: str) -> bool:
+    """
+    Returns False if we got a JS shell → escalate to Scrapling browser.
+    Tuned on real Reddit HTML (Feb 2026).
+    """
+    try:
+        raw = content_bytes.decode("utf-8", errors="replace").lower()
+    except Exception:
+        return True
+
+    # Real rendered pages are significantly larger than shells
+    if len(raw) < 8000:
+        return False
+
+    # Generic JS-shell signals (framework-agnostic)
+    if '<div id="root"></div>' in raw or '<div id="app"></div>' in raw:
+        return False
+    if any(sig in raw for sig in ["enable javascript", "requires javascript", "javascript is required"]):
+        return False
+
+    if "reddit.com" in url.lower():
+        # Strong positive markers of real content
+        if any(m in raw for m in [
+            "shreddit-app",            # root component
+            "shreddit-post",           # post body
+            "shreddit-comment",        # crucial for threads
+            "shreddit-comment-tree",   # comment container
+            "faceplate-tracker",       # engagement tracker (only in real render)
+            'data-testid="post-content"',
+        ]):
+            return True
+
+        # Edge-case: old Reddit structure without new components = shell
+        if 'id="comment-tree"' in raw and "shreddit-comment" not in raw:
+            return False
+
+    return True
+
+
+def _is_cloudflare_protected(status: int | None, content: bytes | None) -> bool:
+    """
+    Detect if curl_cffi hit a solvable Cloudflare challenge page.
+    Only returns True for actual CF interstitial/Turnstile pages — NOT bare 403s.
+    A bare 403 (e.g. GameStop Bot Fight Mode) has no challenge to solve,
+    so solve_cloudflare=True would waste time and still fail.
+    """
+    if not content:
+        return False
+    try:
+        snippet = content[:8000].decode("utf-8", errors="replace").lower()
+        return any(m in snippet for m in [
+            "just a moment",            # CF interstitial spinner
+            "cf-browser-verification",  # CF challenge form
+            "checking your browser",    # CF spinner text
+            "cf_chl_opt",               # CF challenge JS variable
+            "challenge-platform",       # CF challenge platform
+        ])
+    except Exception:
+        return False
+
+
 async def _fetch_raw(url: str) -> tuple[bytes, dict, int, str]:
     """
-    Fetch URL bytes. Tries curl_cffi (Chrome impersonation) first,
-    falls back to httpx if curl_cffi is not installed or fails.
+    Fetch URL bytes with tiered fallback strategy:
+      1. curl_cffi           — Chrome TLS impersonation, fast, no browser
+                               (skipped for Reddit — always needs real browser)
+      2. AsyncStealthySession — stealth Playwright (Patchright), handles JS-rendered
+                                pages: Reddit comments, Cloudflare, heavy SPAs.
+                                solve_cloudflare auto-enabled when CF detected.
+      3. httpx               — last resort, no stealth
     Returns (content_bytes, headers_dict, status_code, fetcher_name)
     """
-    # --- Primary: curl_cffi (bypasses Cloudflare, TLS fingerprinting) ---
-    try:
-        from curl_cffi.requests import AsyncSession
-        async with AsyncSession() as session:
-            r = await session.get(
-                url,
-                impersonate="chrome",
-                allow_redirects=True,
-                max_redirects=MAX_REDIRECTS,
-                timeout=30,
-            )
-            return r.content, dict(r.headers), r.status_code, "curl_cffi"
-    except ImportError:
-        pass  # curl_cffi not installed, fall through
-    except Exception:
-        pass  # curl_cffi failed, fall through to httpx
+    is_reddit = "reddit.com" in url.lower()
+    curl_cffi_status: int | None = None
+    curl_cffi_content: bytes | None = None
 
-    # --- Fallback: httpx ---
-    import httpx
-    async with httpx.AsyncClient(
-        follow_redirects=True,
-        max_redirects=MAX_REDIRECTS,
-        timeout=30.0,
-    ) as client:
-        r = await client.get(url, headers={"User-Agent": USER_AGENT})
-        r.raise_for_status()
-        return r.content, dict(r.headers), r.status_code, "httpx"
+    # --- Tier 1: curl_cffi (Chrome TLS fingerprint, fast, no browser) ---
+    # Skipped for Reddit: always returns a JS shell or triggers "prove you are human"
+    if not is_reddit:
+        try:
+            from curl_cffi.requests import AsyncSession
+            async with AsyncSession() as session:
+                r = await session.get(
+                    url,
+                    impersonate="chrome",
+                    allow_redirects=True,
+                    max_redirects=MAX_REDIRECTS,
+                    timeout=25,
+                    headers={"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
+                )
+                curl_cffi_status = r.status_code
+                curl_cffi_content = r.content
+                if r.status_code < 400 and _is_content_sufficient(r.content, url):
+                    print(f"DEBUG: [web_fetch] {url} → curl_cffi")
+                    return r.content, dict(r.headers), r.status_code, "curl_cffi"
+                # status >= 400 or JS shell → fall through to browser tier
+        except Exception as e:
+            print(f"DEBUG: curl_cffi failed → {e}")
+
+    # --- Tier 2: AsyncStealthySession (scrapling) — stealth Playwright (Patchright) ---
+    # Uses Playwright Chromium + Patchright stealth patches (Camoufox removed in v0.4)
+    # network_idle is intentionally disabled for both Reddit and CF sites:
+    #   - Reddit: never fully idles (realtime polls, ads, notifications) → waits full timeout
+    #   - CF sites: background pings after Turnstile solve → hangs
+    # Instead we use load event + a short fixed wait for JS content to inject
+    if SCRAPLING_AVAILABLE:
+        try:
+            solve_cf = _is_cloudflare_protected(curl_cffi_status, curl_cffi_content)
+            if solve_cf:
+                print(f"DEBUG: [web_fetch] Cloudflare detected → enabling solve_cloudflare")
+            async with AsyncStealthySession(
+                headless=True,
+                solve_cloudflare=solve_cf,
+            ) as session:
+                page = await session.fetch(
+                    url,
+                    network_idle=False,          # disabled — Reddit/CF never fully idle
+                    adaptive=True,
+                    timeout=30000 if solve_cf else 45000,  # CF=30s, Reddit/SPA=45s
+                )
+                if page:
+                    status = getattr(page, "status", getattr(page, "status_code", 200))
+                    if status < 400:
+                        html_bytes = getattr(page, "html_content", getattr(page, "html", "")).encode("utf-8", errors="replace")
+                        headers = {"content-type": "text/html; charset=utf-8"}
+                        print(f"DEBUG: [web_fetch] {url} → scrapling (browser)")
+                        return html_bytes, headers, status, "scrapling"
+        except Exception as e:
+            print(f"DEBUG: scrapling failed → {e}")
+
+    # --- Tier 3: httpx (last resort, no stealth) ---
+    try:
+        import httpx
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            max_redirects=MAX_REDIRECTS,
+            timeout=30.0,
+            headers={"User-Agent": USER_AGENT},
+        ) as client:
+            r = await client.get(url)
+            # Don't raise_for_status — caller needs content even on 4xx/5xx for error diagnosis
+            print(f"DEBUG: [web_fetch] {url} → httpx (fallback)")
+            return r.content, dict(r.headers), r.status_code, "httpx"
+    except Exception as e:
+        raise Exception(f"All fetchers failed for {url}: {e}") from e
 
 
 def _html_to_text(raw_html: str, extract_mode: str = "markdown") -> tuple[str, str]:
@@ -174,7 +293,7 @@ def _readability_to_markdown(raw_html: str) -> str:
     # Try markdownify first
     try:
         from markdownify import markdownify as md
-        return _normalize(md(raw_html, heading_style="ATX", strip=['a'] if False else []))
+        return _normalize(md(raw_html, heading_style="ATX", strip=[]))
     except ImportError:
         pass
 
@@ -221,14 +340,9 @@ class WebSearchTool(Tool):
                 if not result.startswith("Error"):
                     return result
                 else:
-                    # SearXNG returned an error, falling back to Brave
                     print(f" DEBUG: SearXNG search failed with error, falling back to Brave API")
             except Exception as e:
-                # SearXNG threw an exception, falling back to Brave
                 print(f" DEBUG: SearXNG search threw exception, falling back to Brave API")
-        else:
-            pass
-
         # Fallback to Brave
         return await self._search_brave(query, count)
 
@@ -266,7 +380,7 @@ class WebSearchTool(Tool):
 
     async def _search_brave(self, query: str, count: int | None = None) -> str:
         """Search using Brave Search API."""
-        
+
         if not self.api_key:
             return (
                 "Error: Brave Search API key not configured. "
@@ -306,7 +420,7 @@ class WebFetchTool(Tool):
     """
     Fetch and extract content from a URL.
 
-    Fetcher priority:  curl_cffi (Chrome impersonation) → httpx
+    Fetcher priority:  curl_cffi → StealthyFetcher (scrapling) → httpx
     Extractor priority: trafilatura → readability → strip_tags
     """
 
@@ -324,6 +438,7 @@ class WebFetchTool(Tool):
     def __init__(self, max_chars: int = 200000):
         self.max_chars = max_chars
         self._cache: dict[str, str] = {}  # session-level URL cache
+        self._cache_max = 50  # prevent unbounded memory growth
 
     async def execute(self, url: str, extractMode: str = "markdown", **kwargs: Any) -> str:
         # Validate
@@ -395,6 +510,9 @@ class WebFetchTool(Tool):
                     "word_count": len(text.split()), "length": len(text), "text": text
                 }, ensure_ascii=False)
 
+            if len(self._cache) >= self._cache_max:
+                # Evict oldest entry (insertion-order dict, Python 3.7+)
+                self._cache.pop(next(iter(self._cache)))
             self._cache[cache_key] = result
             return result
 

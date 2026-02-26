@@ -187,16 +187,20 @@ async def _fetch_raw(url: str) -> tuple[bytes, dict, int, str]:
                     impersonate="chrome",
                     allow_redirects=True,
                     max_redirects=MAX_REDIRECTS,
-                    timeout=25,
+                    timeout=30,
                     headers={"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
                 )
                 curl_cffi_status = r.status_code
                 curl_cffi_content = r.content
                 if r.status_code < 400 and _is_content_sufficient(r.content, url):
-                    print(f"DEBUG: [web_fetch] {url} → curl_cffi")
                     return r.content, dict(r.headers), r.status_code, "curl_cffi"
                 # status >= 400 or JS shell → fall through to browser tier
         except Exception as e:
+            error_str = str(e).lower()
+            # Check if it's a timeout error - if so, server is down, skip all other methods
+            if any(x in error_str for x in ["timeout", "timed out", "operation timed out"]):
+                print(f"DEBUG: curl_cffi timeout → server appears down, skipping other fetchers")
+                raise Exception(f"Server timeout: {url} is not responding") from e
             print(f"DEBUG: curl_cffi failed → {e}")
 
     # --- Tier 2: AsyncStealthySession (scrapling) — stealth Playwright (Patchright) ---
@@ -225,7 +229,7 @@ async def _fetch_raw(url: str) -> tuple[bytes, dict, int, str]:
                     if status < 400:
                         html_bytes = getattr(page, "html_content", getattr(page, "html", "")).encode("utf-8", errors="replace")
                         headers = {"content-type": "text/html; charset=utf-8"}
-                        print(f"DEBUG: [web_fetch] {url} → scrapling (browser)")
+                        print(f"DEBUG: [web_fetch] → scrapling (browser)")
                         return html_bytes, headers, status, "scrapling"
         except Exception as e:
             print(f"DEBUG: scrapling failed → {e}")
@@ -241,7 +245,7 @@ async def _fetch_raw(url: str) -> tuple[bytes, dict, int, str]:
         ) as client:
             r = await client.get(url)
             # Don't raise_for_status — caller needs content even on 4xx/5xx for error diagnosis
-            print(f"DEBUG: [web_fetch] {url} → httpx (fallback)")
+            print(f"DEBUG: [web_fetch] → httpx (fallback)")
             return r.content, dict(r.headers), r.status_code, "httpx"
     except Exception as e:
         raise Exception(f"All fetchers failed for {url}: {e}") from e

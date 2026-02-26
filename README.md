@@ -1,3 +1,9 @@
+## Main changes in This Branch
+
+- **feat(web_fetch): add scrapling browser tier between curl_cffi and httpx fallback** : Manage JS-rendered pages / Cloudflare
+
+---
+
 ## Main changes in This Fork
 
 - **Tools Summary**: Shows a clean separate message at the end listing used tools  

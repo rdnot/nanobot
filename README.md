@@ -1,3 +1,26 @@
+## Main changes in This Fork
+
+- **Tools Summary**: Shows a clean separate message at the end listing used tools  
+  `**Tools used:** - search(... ...) - fetch[](https://...) - read_file(...)`
+
+- **PDF Support**: `web_fetch` now properly reads direct PDF files (no more "binary data" error)
+
+-  **Web_fetch improvements** : curl_cffi + trafilatura upgrade (better anti-bot evasion and text extraction)
+
+- **Privacy-Focused Search**: Uses local SearXNG first (if provide SearXNG URL), falls back to Brave
+
+- **New Commands**:
+  - `/c` → Clear session (no memory consolidation)
+  - `/rerun` → Run `workspace\rerun.bat` from chat
+
+- **Other**: Increased `web_fetch` limit to 200,000 chars, ExecTool timeout to 90s
+
+---
+
+*(Original HKUDS/nanobot project)*
+
+
+
 <div align="center">
   <img src="nanobot_logo.png" alt="nanobot" width="500">
   <h1>nanobot: Ultra-Lightweight Personal AI Assistant</h1>

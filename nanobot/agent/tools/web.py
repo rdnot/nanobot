@@ -450,6 +450,10 @@ class WebFetchTool(Tool):
         if not is_valid:
             return json.dumps({"error": f"URL validation failed: {error_msg}", "url": url}, ensure_ascii=False)
 
+        # Convert Reddit URLs to JSON API endpoints
+        if "reddit.com" in url.lower() and not url.lower().endswith(".json"):
+            url = url.rstrip('/') + '/.json'
+
         # Cache hit
         cache_key = f"{url}::{extractMode}"
         if cache_key in self._cache:

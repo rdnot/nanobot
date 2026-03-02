@@ -7,6 +7,9 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
+import httpx
+from loguru import logger
+
 from nanobot.agent.tools.base import Tool
 
 # Shared constants
@@ -93,7 +96,7 @@ def _extract_meta(raw_html: str) -> dict[str, str]:
     return meta
 
 
-async def _fetch_raw(url: str) -> tuple[bytes, dict, int, str]:
+async def _fetch_raw(url: str, proxy: str | None = None) -> tuple[bytes, dict, int, str]:
     """
     Fetch URL bytes. Tries curl_cffi (Chrome impersonation) first,
     falls back to httpx if curl_cffi is not installed or fails.
@@ -102,6 +105,7 @@ async def _fetch_raw(url: str) -> tuple[bytes, dict, int, str]:
     # --- Primary: curl_cffi (bypasses Cloudflare, TLS fingerprinting) ---
     try:
         from curl_cffi.requests import AsyncSession
+        logger.debug("curl_cffi fetch: {}", "proxy enabled" if proxy else "direct connection")
         async with AsyncSession() as session:
             r = await session.get(
                 url,
@@ -109,6 +113,7 @@ async def _fetch_raw(url: str) -> tuple[bytes, dict, int, str]:
                 allow_redirects=True,
                 max_redirects=MAX_REDIRECTS,
                 timeout=30,
+                proxy=proxy,
             )
             return r.content, dict(r.headers), r.status_code, "curl_cffi"
     except ImportError:
@@ -117,11 +122,12 @@ async def _fetch_raw(url: str) -> tuple[bytes, dict, int, str]:
         pass  # curl_cffi failed, fall through to httpx
 
     # --- Fallback: httpx ---
-    import httpx
+    logger.debug("httpx fetch: {}", "proxy enabled" if proxy else "direct connection")
     async with httpx.AsyncClient(
         follow_redirects=True,
         max_redirects=MAX_REDIRECTS,
         timeout=30.0,
+        proxy=proxy,
     ) as client:
         r = await client.get(url, headers={"User-Agent": USER_AGENT})
         r.raise_for_status()
@@ -203,10 +209,11 @@ class WebSearchTool(Tool):
         "required": ["query"]
     }
 
-    def __init__(self, api_key: str | None = None, max_results: int = 5):
+    def __init__(self, api_key: str | None = None, max_results: int = 5, proxy: str | None = None):
         self._init_api_key = api_key
         self.searxng_url = os.environ.get("SEARXNG_URL", DEFAULT_SEARXNG_URL)
         self.max_results = max_results
+        self.proxy = proxy
 
     @property
     def api_key(self) -> str:
@@ -234,11 +241,11 @@ class WebSearchTool(Tool):
 
     async def _search_searxng(self, query: str, count: int | None = None) -> str:
         """Search using local SearXNG instance."""
-        import httpx
         n = min(max(count or self.max_results, 1), 10)
 
         try:
-            async with httpx.AsyncClient() as client:
+            logger.debug("SearXNG search: {}", "proxy enabled" if self.proxy else "direct connection")
+            async with httpx.AsyncClient(proxy=self.proxy) as client:
                 r = await client.get(
                     f"{self.searxng_url.rstrip('/')}/search",
                     params={"q": query, "format": "json"},
@@ -261,7 +268,11 @@ class WebSearchTool(Tool):
                 if published := item.get("publishedDate"):
                     lines.append(f"   Published: {published}")
             return "\n".join(lines)
+        except httpx.ProxyError as e:
+            logger.error("SearXNG proxy error: {}", e)
+            return f"Error: {e}"
         except Exception as e:
+            logger.error("SearXNG error: {}", e)
             return f"Error: {e}"
 
     async def _search_brave(self, query: str, count: int | None = None) -> str:
@@ -275,9 +286,9 @@ class WebSearchTool(Tool):
             )
 
         try:
-            import httpx
             n = min(max(count or self.max_results, 1), 10)
-            async with httpx.AsyncClient() as client:
+            logger.debug("Brave search: {}", "proxy enabled" if self.proxy else "direct connection")
+            async with httpx.AsyncClient(proxy=self.proxy) as client:
                 r = await client.get(
                     "https://api.search.brave.com/res/v1/web/search",
                     params={"q": query, "count": n},
@@ -298,7 +309,11 @@ class WebSearchTool(Tool):
                 if age := item.get("age"):
                     lines.append(f"   Published: {age}")
             return "\n".join(lines)
+        except httpx.ProxyError as e:
+            logger.error("Brave search proxy error: {}", e)
+            return f"Error: {e}"
         except Exception as e:
+            logger.error("Brave search error: {}", e)
             return f"Error: {e}"
 
 
@@ -321,8 +336,9 @@ class WebFetchTool(Tool):
         "required": ["url"]
     }
 
-    def __init__(self, max_chars: int = 200000):
+    def __init__(self, max_chars: int = 200000, proxy: str | None = None):
         self.max_chars = max_chars
+        self.proxy = proxy
         self._cache: dict[str, str] = {}  # session-level URL cache
 
     async def execute(self, url: str, extractMode: str = "markdown", **kwargs: Any) -> str:
@@ -337,7 +353,7 @@ class WebFetchTool(Tool):
             return self._cache[cache_key]
 
         try:
-            content_bytes, headers, status_code, fetcher = await _fetch_raw(url)
+            content_bytes, headers, status_code, fetcher = await _fetch_raw(url, self.proxy)
             ctype = headers.get("content-type", "").lower()
 
             # --- PDF ---

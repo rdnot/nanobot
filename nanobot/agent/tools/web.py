@@ -7,6 +7,9 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
+import httpx
+from loguru import logger
+
 from nanobot.agent.tools.base import Tool
 
 # Scrapling availability check (async browser tier)
@@ -161,7 +164,7 @@ def _is_cloudflare_protected(status: int | None, content: bytes | None) -> bool:
         return False
 
 
-async def _fetch_raw(url: str) -> tuple[bytes, dict, int, str]:
+async def _fetch_raw(url: str, proxy: str | None = None) -> tuple[bytes, dict, int, str]:
     """
     Fetch URL bytes with tiered fallback strategy:
       1. curl_cffi           — Chrome TLS impersonation, fast, no browser
@@ -181,6 +184,7 @@ async def _fetch_raw(url: str) -> tuple[bytes, dict, int, str]:
     if not is_reddit:
         try:
             from curl_cffi.requests import AsyncSession
+            logger.debug("curl_cffi fetch: {}", "proxy enabled" if proxy else "direct connection")
             async with AsyncSession() as session:
                 r = await session.get(
                     url,
@@ -189,19 +193,23 @@ async def _fetch_raw(url: str) -> tuple[bytes, dict, int, str]:
                     max_redirects=MAX_REDIRECTS,
                     timeout=30,
                     headers={"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
+                    proxy=proxy,
                 )
                 curl_cffi_status = r.status_code
                 curl_cffi_content = r.content
                 if r.status_code < 400 and _is_content_sufficient(r.content, url):
                     return r.content, dict(r.headers), r.status_code, "curl_cffi"
                 # status >= 400 or JS shell → fall through to browser tier
+        except httpx.ProxyError as e:
+            logger.error("curl_cffi proxy error: {}", e)
+            # Proxy error, skip to next tier
         except Exception as e:
+            logger.error("curl_cffi error: {}", e)
             error_str = str(e).lower()
             # Check if it's a timeout error - if so, server is down, skip all other methods
             if any(x in error_str for x in ["timeout", "timed out", "operation timed out"]):
-                print(f"DEBUG: curl_cffi timeout → server appears down, skipping other fetchers")
+                logger.error("curl_cffi timeout → server appears down, skipping other fetchers")
                 raise Exception(f"Server timeout: {url} is not responding") from e
-            print(f"DEBUG: curl_cffi failed → {e}")
 
     # --- Tier 2: AsyncStealthySession (scrapling) — stealth Playwright (Patchright) ---
     # Uses Playwright Chromium + Patchright stealth patches (Camoufox removed in v0.4)
@@ -213,10 +221,12 @@ async def _fetch_raw(url: str) -> tuple[bytes, dict, int, str]:
         try:
             solve_cf = _is_cloudflare_protected(curl_cffi_status, curl_cffi_content)
             if solve_cf:
-                print(f"DEBUG: [web_fetch] Cloudflare detected → enabling solve_cloudflare")
+                logger.debug("Cloudflare detected → enabling solve_cloudflare")
+            logger.debug("AsyncStealthySession fetch: {}", "proxy enabled" if proxy else "direct connection")
             async with AsyncStealthySession(
                 headless=True,
                 solve_cloudflare=solve_cf,
+                proxy=proxy,
             ) as session:
                 page = await session.fetch(
                     url,
@@ -229,25 +239,30 @@ async def _fetch_raw(url: str) -> tuple[bytes, dict, int, str]:
                     if status < 400:
                         html_bytes = getattr(page, "html_content", getattr(page, "html", "")).encode("utf-8", errors="replace")
                         headers = {"content-type": "text/html; charset=utf-8"}
-                        print(f"DEBUG: [web_fetch] → scrapling (browser)")
+                        logger.debug("Scrapling browser fetch succeeded")
                         return html_bytes, headers, status, "scrapling"
         except Exception as e:
-            print(f"DEBUG: scrapling failed → {e}")
+            logger.error("Scrapling error: {}", e)
 
     # --- Tier 3: httpx (last resort, no stealth) ---
     try:
-        import httpx
+        logger.debug("httpx fetch (fallback): {}", "proxy enabled" if proxy else "direct connection")
         async with httpx.AsyncClient(
             follow_redirects=True,
             max_redirects=MAX_REDIRECTS,
             timeout=30.0,
             headers={"User-Agent": USER_AGENT},
+            proxy=proxy,
         ) as client:
             r = await client.get(url)
             # Don't raise_for_status — caller needs content even on 4xx/5xx for error diagnosis
-            print(f"DEBUG: [web_fetch] → httpx (fallback)")
+            logger.debug("httpx fallback fetch succeeded")
             return r.content, dict(r.headers), r.status_code, "httpx"
+    except httpx.ProxyError as e:
+        logger.error("httpx proxy error: {}", e)
+        raise Exception(f"All fetchers failed for {url}: {e}") from e
     except Exception as e:
+        logger.error("httpx error: {}", e)
         raise Exception(f"All fetchers failed for {url}: {e}") from e
 
 
@@ -326,10 +341,11 @@ class WebSearchTool(Tool):
         "required": ["query"]
     }
 
-    def __init__(self, api_key: str | None = None, max_results: int = 5):
+    def __init__(self, api_key: str | None = None, max_results: int = 5, proxy: str | None = None):
         self._init_api_key = api_key
         self.searxng_url = os.environ.get("SEARXNG_URL", DEFAULT_SEARXNG_URL)
         self.max_results = max_results
+        self.proxy = proxy
 
     @property
     def api_key(self) -> str:
@@ -344,19 +360,19 @@ class WebSearchTool(Tool):
                 if not result.startswith("Error"):
                     return result
                 else:
-                    print(f" DEBUG: SearXNG search failed with error, falling back to Brave API")
+                    logger.debug("SearXNG search failed with error, falling back to Brave API")
             except Exception as e:
-                print(f" DEBUG: SearXNG search threw exception, falling back to Brave API")
+                logger.debug("SearXNG search threw exception: {}, falling back to Brave API", e)
         # Fallback to Brave
         return await self._search_brave(query, count)
 
     async def _search_searxng(self, query: str, count: int | None = None) -> str:
         """Search using local SearXNG instance."""
-        import httpx
         n = min(max(count or self.max_results, 1), 10)
 
         try:
-            async with httpx.AsyncClient() as client:
+            logger.debug("SearXNG search: {}", "proxy enabled" if self.proxy else "direct connection")
+            async with httpx.AsyncClient(proxy=self.proxy) as client:
                 r = await client.get(
                     f"{self.searxng_url.rstrip('/')}/search",
                     params={"q": query, "format": "json"},
@@ -379,7 +395,11 @@ class WebSearchTool(Tool):
                 if published := item.get("publishedDate"):
                     lines.append(f"   Published: {published}")
             return "\n".join(lines)
+        except httpx.ProxyError as e:
+            logger.error("SearXNG proxy error: {}", e)
+            return f"Error: {e}"
         except Exception as e:
+            logger.error("SearXNG error: {}", e)
             return f"Error: {e}"
 
     async def _search_brave(self, query: str, count: int | None = None) -> str:
@@ -393,9 +413,9 @@ class WebSearchTool(Tool):
             )
 
         try:
-            import httpx
             n = min(max(count or self.max_results, 1), 10)
-            async with httpx.AsyncClient() as client:
+            logger.debug("Brave search: {}", "proxy enabled" if self.proxy else "direct connection")
+            async with httpx.AsyncClient(proxy=self.proxy) as client:
                 r = await client.get(
                     "https://api.search.brave.com/res/v1/web/search",
                     params={"q": query, "count": n},
@@ -416,7 +436,11 @@ class WebSearchTool(Tool):
                 if age := item.get("age"):
                     lines.append(f"   Published: {age}")
             return "\n".join(lines)
+        except httpx.ProxyError as e:
+            logger.error("Brave search proxy error: {}", e)
+            return f"Error: {e}"
         except Exception as e:
+            logger.error("Brave search error: {}", e)
             return f"Error: {e}"
 
 
@@ -439,8 +463,9 @@ class WebFetchTool(Tool):
         "required": ["url"]
     }
 
-    def __init__(self, max_chars: int = 200000):
+    def __init__(self, max_chars: int = 200000, proxy: str | None = None):
         self.max_chars = max_chars
+        self.proxy = proxy
         self._cache: dict[str, str] = {}  # session-level URL cache
         self._cache_max = 50  # prevent unbounded memory growth
 
@@ -460,7 +485,7 @@ class WebFetchTool(Tool):
             return self._cache[cache_key]
 
         try:
-            content_bytes, headers, status_code, fetcher = await _fetch_raw(url)
+            content_bytes, headers, status_code, fetcher = await _fetch_raw(url, self.proxy)
             ctype = headers.get("content-type", "").lower()
 
             # --- PDF ---

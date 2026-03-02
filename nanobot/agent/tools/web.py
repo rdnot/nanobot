@@ -105,7 +105,7 @@ def _extract_meta(raw_html: str) -> dict[str, str]:
 
 def _is_content_sufficient(content_bytes: bytes, url: str) -> bool:
     """
-    Returns False if we got a JS shell or thin paywall → escalate to Scrapling browser.
+    Returns False if we got a JS shell → escalate to Scrapling browser.
     Tuned on real Reddit HTML (Feb 2026).
     """
     try:
@@ -138,22 +138,6 @@ def _is_content_sufficient(content_bytes: bytes, url: str) -> bool:
         # Edge-case: old Reddit structure without new components = shell
         if 'id="comment-tree"' in raw and "shreddit-comment" not in raw:
             return False
-
-    # Large HTML shell but thin readable text = paywall or SPA not yet rendered.
-    # Strip scripts/styles/tags and measure actual readable text.
-    try:
-        text = re.sub(r'<script[\s\S]*?</script>', '', raw, flags=re.I)
-        text = re.sub(r'<style[\s\S]*?</style>', '', text, flags=re.I)
-        text = re.sub(r'<[^>]+>', '', text)
-        text = re.sub(r'\s+', ' ', text).strip()
-        if len(text) < 1000:
-            logger.debug(
-                "_is_content_sufficient: {} raw bytes but only {} text chars → escalating to browser",
-                len(raw), len(text)
-            )
-            return False
-    except Exception:
-        pass
 
     return True
 

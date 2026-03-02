@@ -146,9 +146,11 @@ def _is_content_sufficient(content_bytes: bytes, url: str) -> bool:
         text = re.sub(r'<style[\s\S]*?</style>', '', text, flags=re.I)
         text = re.sub(r'<[^>]+>', '', text)
         text = re.sub(r'\s+', ' ', text).strip()
-        logger.debug("_is_content_sufficient: {} raw bytes → {} text chars after strip", len(raw), len(text))
-        if len(text) < 1500:
-            logger.debug("→ insufficient text, escalating to browser tier")
+        if len(text) < 1000:
+            logger.debug(
+                "_is_content_sufficient: {} raw bytes but only {} text chars → escalating to browser",
+                len(raw), len(text)
+            )
             return False
     except Exception:
         pass
@@ -211,12 +213,7 @@ async def _fetch_raw(url: str, proxy: str | None = None) -> tuple[bytes, dict, i
                 )
                 curl_cffi_status = r.status_code
                 curl_cffi_content = r.content
-                sufficient = _is_content_sufficient(r.content, url)
-                logger.debug(
-                    "curl_cffi result: status={} raw_bytes={} sufficient={}",
-                    r.status_code, len(r.content), sufficient
-                )
-                if r.status_code < 400 and sufficient:
+                if r.status_code < 400 and _is_content_sufficient(r.content, url):
                     return r.content, dict(r.headers), r.status_code, "curl_cffi"
                 # status >= 400 or JS shell → fall through to browser tier
         except httpx.ProxyError as e:

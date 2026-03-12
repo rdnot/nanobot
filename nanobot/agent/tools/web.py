@@ -117,7 +117,7 @@ async def _fetch_raw(url: str, proxy: str | None = None) -> tuple[bytes, dict, i
             )
             return r.content, dict(r.headers), r.status_code, "curl_cffi"
     except ImportError:
-        pass  # curl_cffi not installed, fall through
+        print("curl_cffi not installed – run: pip install curl_cffi")
     except Exception:
         pass  # curl_cffi failed, fall through to httpx
 
@@ -154,7 +154,7 @@ def _html_to_text(raw_html: str, extract_mode: str = "markdown") -> tuple[str, s
         if result and len(result.strip()) > 200:
             return result, "trafilatura"
     except ImportError:
-        pass
+        print("trafilatura not installed – pip install trafilatura")
 
     # --- Fallback: readability ---
     try:

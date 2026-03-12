@@ -222,6 +222,8 @@ async def _fetch_raw(url: str, proxy: str | None = None) -> tuple[bytes, dict, i
                 if r.status_code < 400 and _is_content_sufficient(r.content, url):
                     return r.content, dict(r.headers), r.status_code, "curl_cffi"
                 # status >= 400 or JS shell → fall through to browser tier
+        except ImportError:
+            logger.warning("curl_cffi not installed → skipping to next fetcher. Run: pip install curl_cffi")
         except httpx.ProxyError as e:
             logger.error("curl_cffi proxy error: {}", e)
             # Proxy error, skip to next tier
@@ -582,7 +584,7 @@ def _html_to_text(raw_html: str, extract_mode: str = "markdown", url: str = "") 
         if result and len(result.strip()) > 50:
             return result, "trafilatura"
     except ImportError:
-        pass
+        print("trafilatura not installed – pip install trafilatura")
 
     # --- Fallback: readability ---
     try:

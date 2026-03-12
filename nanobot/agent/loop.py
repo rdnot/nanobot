@@ -52,7 +52,7 @@ class AgentLoop:
         workspace: Path,
         model: str | None = None,
         max_iterations: int = 40,
-        context_window_tokens: int = 65_536,
+        context_window_tokens: int = 200_000,
         brave_api_key: str | None = None,
         web_proxy: str | None = None,
         exec_config: ExecToolConfig | None = None,
@@ -167,22 +167,61 @@ class AgentLoop:
         """Format tool calls as concise hint, e.g. 'web_search("query")'."""
         def _fmt(tc):
             args = (tc.arguments[0] if isinstance(tc.arguments, list) else tc.arguments) or {}
-            val = next(iter(args.values()), None) if isinstance(args, dict) else None
-            if not isinstance(val, str):
-                return tc.name
-            return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
+            if tc.name == "web_search":
+                val = tc.arguments.get("query", "") if tc.arguments else ""
+                val = val[:40] + "…" if len(val) > 40 else val
+                return f'search("{val}")'
+            elif tc.name in ("web_fetch", "fetch"):
+                url = tc.arguments.get("url", "") if tc.arguments else ""
+                return f'fetch("{url}")'
+            else:
+                val = next(iter(args.values()), None) if isinstance(args, dict) else None
+                if not isinstance(val, str):
+                    return tc.name
+                return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
+
+    @staticmethod
+    def _build_tools_summary(all_tool_calls: list[dict]) -> str:
+        """Build a separate 'Tools used' message from accumulated tool call records."""
+        if not all_tool_calls:
+            return ""
+        lines = ["**Tools used:**"]
+        for item in all_tool_calls:
+            name = item.get("name", "")
+            args = item.get("arguments", {})
+            if name == "web_search":
+                query = args.get("query", "")
+                lines.append(f"- search({query})")
+            elif name in ("web_fetch", "fetch"):
+                url = args.get("url", "")
+                lines.append(f'- fetch("{url}")')
+            elif name in ("read_file",):
+                path = args.get("path", next(iter(args.values()), "***") if args else "***")
+                lines.append(f"- read_file({path})")
+            else:
+                val = next(iter(args.values()), "") if args else ""
+                if isinstance(val, str):
+                    val = val[:60] + "…" if len(val) > 60 else val
+                    lines.append(f"- {name}({val})")
+                else:
+                    lines.append(f"- {name}(...)")
+        return "\n".join(lines)
 
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
-    ) -> tuple[str | None, list[str], list[dict]]:
-        """Run the agent iteration loop."""
+    ) -> tuple[str | None, list[str], list[dict], list[dict]]:
+        """Run the agent iteration loop. Returns (final_content, tools_used, messages, all_tool_calls_log)."""
         messages = initial_messages
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+
+        all_tool_calls_log: list[dict] = []  # Accumulate all tool calls for summary message
+
+        FORCE_FINAL_THRESHOLD = max(1, self.max_iterations - 2)
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -214,12 +253,21 @@ class AgentLoop:
 
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
+                    all_tool_calls_log.append({"name": tool_call.name, "arguments": tool_call.arguments or {}})
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+                    if iteration >= FORCE_FINAL_THRESHOLD:
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                            "For research query, don't use any more tools. "
+                            "Provide your final answer now based on all the information gathered."
+                        )
+                    })
             else:
                 clean = self._strip_think(response.content)
                 # Don't persist error responses to session history — they can
@@ -242,7 +290,7 @@ class AgentLoop:
                 "without completing the task. You can try breaking the task into smaller steps."
             )
 
-        return final_content, tools_used, messages
+        return final_content, tools_used, messages, all_tool_calls_log
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
@@ -336,7 +384,7 @@ class AgentLoop:
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
-            final_content, _, all_msgs = await self._run_agent_loop(messages)
+            final_content, _, all_msgs, _ = await self._run_agent_loop(messages)
             self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
             await self.memory_consolidator.maybe_consolidate_by_tokens(session)
@@ -372,9 +420,34 @@ class AgentLoop:
             self.sessions.invalidate(session.key)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started.")
+
+        if cmd == "/c":
+            session.clear()
+            self.sessions.save(session)
+            self.sessions.invalidate(session.key)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="🐈 Session cleared (no memory consolidation).",
+            )
+
+        if cmd == "/rerun":
+            import subprocess
+            rerun_bat = self.workspace / "rerun.bat"
+            if not rerun_bat.exists():
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                              content="❌ rerun.bat not found in workspace.")
+            try:
+                subprocess.Popen(str(rerun_bat), shell=True, cwd=str(self.workspace))
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                              content="✅ rerun.bat started.")
+            except Exception as e:
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                              content=f"❌ Failed to run rerun.bat: {e}")
+
         if cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="🐈 nanobot commands:\n/new — Start a new conversation\n/stop — Stop the current task\n/help — Show available commands")
+                                 content="🐈 nanobot commands:\n/new — Start a new conversation\n/stop — Stop the current task\n/c  — Clear session instantly (no memory saved)\n/rerun — Run rerun.bat in workspace\n/help — Show available commands")
 
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
@@ -399,7 +472,7 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
-        final_content, _, all_msgs = await self._run_agent_loop(
+        final_content, _, all_msgs, tool_calls_log = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
         )
 
@@ -411,10 +484,26 @@ class AgentLoop:
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
+            # Agent used message tool to send its answer — still send tools summary before it
+            if tool_calls_log:
+                tools_summary = self._build_tools_summary(tool_calls_log)
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id, content=tools_summary,
+                    metadata={**(msg.metadata or {}), "_tools_summary": True},
+                ))
             return None
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
+
+        # Send tools summary before the final answer
+        if tool_calls_log:
+            tools_summary = self._build_tools_summary(tool_calls_log)
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content=tools_summary,
+                metadata={**(msg.metadata or {}), "_tools_summary": True},
+            ))
+
         return OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=final_content,
             metadata=msg.metadata or {},

@@ -1,6 +1,6 @@
 ## Main changes in This Fork
 
-- **Tools Summary**: Shows a clean separate message at the end listing used tools  
+- **Tools Summary**: Shows a clean separate message before the final answer listing used tools  
   `**Tools used:** - search(... ...) - fetch[](https://...) - read_file(...)`
 
 - **PDF Support**: `web_fetch` now properly reads direct PDF files (no more "binary data" error)
@@ -13,7 +13,7 @@
   - `/c` → Clear session (no memory consolidation)
   - `/rerun` → Run `workspace\rerun.bat` from chat
 
-- **Other**: Increased `web_fetch` limit to 200,000 chars, ExecTool timeout to 90s
+- **Other**: Increased `web_fetch` limit to 200,000 chars, ExecTool timeout to 90s, context_window_tokens to 200,000 , ReadFileTool._MAX_CHARS 768,000 , ReadFileTool._DEFAULT_LIMIT = 8,000 , Added FORCE_FINAL_THRESHOLD = max_iterations (defualt=40) - 2
 
 ---
 

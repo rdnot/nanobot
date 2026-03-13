@@ -758,7 +758,8 @@ class WebSearchTool(Tool):
                 r.raise_for_status()
             return _format_results(query, r.json().get("results", []), n)
         except Exception as e:
-            return f"Error: {e}"
+            logger.warning("SearXNG request failed ({}), falling back to config.web_search={}", e, self.config.web_search)
+            return await self._dispatch_search(query, n)
 
     async def _search_jina(self, query: str, n: int) -> str:
         api_key = self.config.api_key or os.environ.get("JINA_API_KEY", "")

@@ -340,10 +340,10 @@ def _html_to_text(raw_html: str, extract_mode: str = "markdown", url: str = "") 
         result = trafilatura.extract(raw_html, **common_kwargs)
 
         # BBC (and some other news sites) get rejected by trafilatura's default
-        # paywall/quality heuristic. Re-extract with favour_recall=True which
+        # paywall/quality heuristic. Re-extract with favor_recall=True which
         # disables content-length and quality filters.
         if (not result or len(result.strip()) < 200):
-            result = trafilatura.extract(raw_html, favour_recall=True, **common_kwargs)
+            result = trafilatura.extract(raw_html, favor_recall=True, **common_kwargs)
 
         if result and len(result.strip()) > 50:
             return result, "trafilatura"

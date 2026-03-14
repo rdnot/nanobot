@@ -759,7 +759,17 @@ class WebSearchTool(Tool):
             return _format_results(query, r.json().get("results", []), n)
         except Exception as e:
             logger.warning("SearXNG request failed ({}), falling back to config.web_search={}", e, self.config.web_search)
-            return await self._dispatch_search(query, n)
+            provider = self.config.provider.strip().lower()
+            if provider in ("searxng", ""):
+                return await self._search_duckduckgo(query, n)
+            elif provider == "brave":
+                return await self._search_brave(query, n)
+            elif provider == "tavily":
+                return await self._search_tavily(query, n)
+            elif provider == "jina":
+                return await self._search_jina(query, n)
+            else:
+                return await self._search_duckduckgo(query, n)
 
     async def _search_jina(self, query: str, n: int) -> str:
         api_key = self.config.api_key or os.environ.get("JINA_API_KEY", "")

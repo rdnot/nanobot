@@ -333,6 +333,12 @@ def _html_to_text(raw_html: str, extract_mode: str = "markdown", url: str = "") 
         if result:
             return result, "bbc_next_data"
 
+    # --- ext.to torrent listings ---
+    if "ext.to" in url.lower():
+        result = _extract_ext_to(raw_html, extract_mode)
+        if result:
+            return result, "ext_to"
+
     # --- Primary: trafilatura ---
     try:
         import trafilatura
@@ -640,6 +646,99 @@ def _extract_bbc_next_data(raw_html: str, extract_mode: str = "markdown") -> str
         return result if len(result) > 300 else None
 
     except Exception:
+        return None
+
+
+def _extract_ext_to(raw_html: str, extract_mode: str = "markdown") -> str | None:
+    """
+    Extract torrent listings from ext.to search/category pages.
+
+    ext.to renders a standard HTML table with one <tr> per torrent.
+    Each row contains:
+      - <a href="/slug-XXXXXXXX/"><b>Name</b></a>  — torrent link + name
+      - size <span> (e.g. "1.45 GB")
+      - age  <span> (e.g. "2 days ago")
+      - seeds  <span class="text-success ...">
+      - leeches <span class="text-danger ...">
+
+    Returns a formatted table string or None if no results found.
+    """
+    try:
+        lines: list[str] = []
+
+        # Page title (search query or category name)
+        title_m = re.search(r'<h1[^>]*>([\s\S]*?)</h1>', raw_html, re.I)
+        if title_m:
+            title = _strip_tags(title_m.group(1)).strip()
+            if title:
+                lines.append(f"# {title}\n")
+
+        # Find each torrent row.
+        # ext.to table rows contain an <a href="/...XXXXXXXX/"> with <b>name</b>.
+        # We locate every such anchor, then look at its surrounding <tr>...</tr>.
+        torrent_link_re = re.compile(
+            r'<a\s+href="(/[^"]+/)"[^>]*><b>([^<]+)</b></a>',
+            re.I,
+        )
+
+        entries: list[str] = []
+        for m in torrent_link_re.finditer(raw_html):
+            url_path = m.group(1)
+            name = html.unescape(m.group(2).strip())
+
+            # Isolate the <tr> that contains this anchor
+            pos = m.start()
+            tr_start = raw_html.rfind('<tr', max(0, pos - 600), pos)
+            tr_end = raw_html.find('</tr>', pos, pos + 1200)
+            if tr_start == -1 or tr_end == -1:
+                continue
+            row = raw_html[tr_start : tr_end + 5]
+
+            # Size — matches "1.45 GB", "780 MB", "320 KB", etc.
+            size_m = re.search(
+                r'<span[^>]*>\s*(\d[\d.,]*\s*(?:GB|MB|KB|TB|B))\s*</span>',
+                row, re.I,
+            )
+            size = size_m.group(1).strip() if size_m else "?"
+
+            # Seeds — ext.to uses class="text-success ..."
+            seed_m = re.search(r'class="[^"]*text-success[^"]*"[^>]*>(\d+)</span>', row, re.I)
+            seeds = seed_m.group(1) if seed_m else "0"
+
+            # Leeches — ext.to uses class="text-danger ..."
+            leech_m = re.search(r'class="[^"]*text-danger[^"]*"[^>]*>(\d+)</span>', row, re.I)
+            leeches = leech_m.group(1) if leech_m else "0"
+
+            # Age — matches "2 days ago", "5 hours ago", "just now", etc.
+            age_m = re.search(
+                r'<span[^>]*>\s*([^<]*(?:ago|just now|seconds?|minutes?|hours?|days?|weeks?|months?|years?)[^<]*)\s*</span>',
+                row, re.I,
+            )
+            age = age_m.group(1).strip() if age_m else "?"
+
+            torrent_url = f"https://ext.to{url_path}"
+
+            if extract_mode == "markdown":
+                entries.append(
+                    f"**{name}**\n"
+                    f"  URL: {torrent_url}\n"
+                    f"  Size: {size} | Seeds: {seeds} | Leeches: {leeches} | Age: {age}"
+                )
+            else:
+                entries.append(
+                    f"{name}\n"
+                    f"  URL: {torrent_url}\n"
+                    f"  Size: {size} | Seeds: {seeds} | Leeches: {leeches} | Age: {age}"
+                )
+
+        if not entries:
+            return None
+
+        lines.extend(entries)
+        return "\n\n".join(lines)
+
+    except Exception as e:
+        logger.debug("ext.to extraction failed: {}", e)
         return None
 
 

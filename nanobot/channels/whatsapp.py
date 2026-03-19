@@ -41,6 +41,13 @@ def _markdown_to_whatsapp(text: str) -> str:
     if not text:
         return ""
 
+    # 0. Protect backslash-escaped characters before any formatting
+    escaped_chars: list[str] = []
+    def save_escaped(m: re.Match) -> str:
+        escaped_chars.append(m.group(1))
+        return f"\x02ESC{len(escaped_chars) - 1}\x02"
+    text = re.sub(r'\\([*_~`#|\\])', save_escaped, text)
+
     # 1. Protect code blocks first
     code_blocks: list[str] = []
     def save_code_block(m: re.Match) -> str:
@@ -103,6 +110,10 @@ def _markdown_to_whatsapp(text: str) -> str:
     # 12. Restore code blocks
     for i, code in enumerate(code_blocks):
         text = text.replace(f"{_PH_CODE_BLOCK}{i}\x02", f"```\n{code}\n```")
+
+    # 13. Restore escaped chars as plain literals
+    for i, ch in enumerate(escaped_chars):
+        text = text.replace(f"\x02ESC{i}\x02", ch)
 
     return text
 

@@ -64,8 +64,12 @@ def _markdown_to_whatsapp(text: str) -> str:
 
     # 3. Convert headers to bold (WhatsApp doesn't support # headers)
     def convert_header(m: re.Match) -> str:
-        return f"*{m.group(1).strip().upper()}*"
+        return f"{_PH_BOLD_START}{m.group(1).strip().upper()}{_PH_BOLD_END}"
     text = re.sub(r'^#{1,6}\s+(.+)$', convert_header, text, flags=re.MULTILINE)
+
+    # 3b. Convert bullet lists early: - item or * item -> • item
+    # Must happen before step 4-6 which process * as formatting
+    text = re.sub(r'^[-*]\s+', '• ', text, flags=re.MULTILINE)
 
     # 4. Handle ***bold italic*** -> *_bold italic_* (via placeholder to avoid later corruption)
     text = re.sub(r'\*\*\*(.+?)\*\*\*', f'{_PH_BOLD_ITALIC_START}\\1{_PH_BOLD_ITALIC_END}', text)
@@ -103,18 +107,15 @@ def _markdown_to_whatsapp(text: str) -> str:
             result_lines.append(line)
     text = '\n'.join(result_lines)
 
-    # 11. Convert bullet lists: - item or * item -> • item
-    text = re.sub(r'^[-*]\s+', '• ', text, flags=re.MULTILINE)
-
-    # 12. Restore inline code
+    # 11. Restore inline code
     for i, code in enumerate(inline_codes):
         text = text.replace(f"{_PH_INLINE_CODE}{i}\x02", f"`{code}`")
 
-    # 13. Restore code blocks
+    # 12. Restore code blocks
     for i, code in enumerate(code_blocks):
         text = text.replace(f"{_PH_CODE_BLOCK}{i}\x02", f"```\n{code}\n```")
 
-    # 14. Restore escaped chars as plain literals
+    # 13. Restore escaped chars as plain literals
     for i, ch in enumerate(escaped_chars):
         text = text.replace(f"\x02ESC{i}\x02", ch)
 

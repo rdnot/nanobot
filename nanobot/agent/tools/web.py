@@ -120,6 +120,7 @@ def _build_image_blocks(data: bytes, content_type: str, url: str) -> list[dict[s
     """Convert raw image bytes into multimodal content blocks for vision-capable LLMs."""
     import base64
     b64 = base64.b64encode(data).decode("ascii")
+    # Normalise content-type: strip params like "; charset=..."
     mime = content_type.split(";")[0].strip() or "image/jpeg"
     return [
         {

@@ -56,7 +56,7 @@ class AgentLoop:
         workspace: Path,
         model: str | None = None,
         max_iterations: int = 40,
-        context_window_tokens: int = 65_536,
+        context_window_tokens: int = 200_000,
         web_search_config: WebSearchConfig | None = None,
         web_proxy: str | None = None,
         exec_config: ExecToolConfig | None = None,
@@ -186,12 +186,94 @@ class AgentLoop:
     def _tool_hint(tool_calls: list) -> str:
         """Format tool calls as concise hint, e.g. 'web_search("query")'."""
         def _fmt(tc):
-            args = (tc.arguments[0] if isinstance(tc.arguments, list) else tc.arguments) or {}
-            val = next(iter(args.values()), None) if isinstance(args, dict) else None
-            if not isinstance(val, str):
-                return tc.name
-            return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
+            if tc.name == "web_search":
+                val = tc.arguments.get("query", "") if tc.arguments else ""
+                val = val[:40] + "…" if len(val) > 40 else val
+                return f'search("{val}")'
+            elif tc.name in ("web_fetch", "fetch"):
+                url = tc.arguments.get("url", "") if tc.arguments else ""
+                return f'fetch("{url}")'
+            else:
+                args = (tc.arguments[0] if isinstance(tc.arguments, list) else tc.arguments) or {}
+                val = next(iter(args.values()), None) if isinstance(args, dict) else None
+                if not isinstance(val, str):
+                    return tc.name
+                return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
+
+    @staticmethod
+    def _build_tools_summary(all_tool_calls: list[dict]) -> str:
+        if not all_tool_calls:
+            return ""
+
+        def _shorten_path(path: str) -> str:
+            if not path or not isinstance(path, str):
+                return str(path) if path else ""
+            if "\\.nanobot\\" in path or "/.nanobot/" in path:
+                parts = path.replace("/", "\\").split("\\.nanobot\\")
+                if len(parts) > 1:
+                    after_nanobot = parts[1]
+                    components = [c for c in after_nanobot.split("\\") if c]
+                    if len(components) > 2:
+                        return f"~\\.nanobot\\...\\{components[-2]}\\{components[-1]}"
+                    elif len(components) > 0:
+                        return f"~\\.nanobot\\{after_nanobot}"
+            return path
+
+        def _to_single_line(text: str, max_len: int = 60) -> str:
+            if not isinstance(text, str):
+                text = str(text) if text is not None else ""
+            single = " ".join(text.split())
+            return single[:max_len] + "…" if len(single) > max_len else single
+
+        lines = ["**Tools used:**"]
+        for item in all_tool_calls:
+            name = item.get("name", "")
+            args = item.get("arguments", {})
+            if name == "web_search":
+                query = args.get("query", "") if isinstance(args, dict) else ""
+                lines.append(f"- search({query})")
+            elif name in ("web_fetch", "fetch"):
+                url = args.get("url", "") if isinstance(args, dict) else ""
+                lines.append(f'- fetch("{url}")')
+            elif name in ("read_file",):
+                path = args.get("path", "***") if isinstance(args, dict) else str(args)[:60]
+                path = _shorten_path(path)
+                lines.append(f"- read_file({path})")
+            elif name in ("write_file",):
+                if isinstance(args, dict):
+                    path = _shorten_path(args.get("path", ""))
+                    content = args.get("file_text", "")
+                    first_line = _to_single_line(content, 60)
+                    lines.append(f"- write_file({path}: {first_line})")
+                else:
+                    lines.append("- write_file(...)")
+            elif name in ("edit_file",):
+                if isinstance(args, dict):
+                    path = _shorten_path(args.get("path", ""))
+                    old_str = args.get("old_str", "")
+                    first_line = _to_single_line(old_str, 60)
+                    lines.append(f"- edit_file({path}: {first_line})")
+                else:
+                    lines.append("- edit_file(...)")
+            elif name in ("message",):
+                if isinstance(args, dict):
+                    content = args.get("content", "")
+                    first_line = _to_single_line(content, 60)
+                    lines.append(f"- message({first_line})")
+                else:
+                    lines.append("- message(...)")
+            else:
+                if isinstance(args, dict):
+                    val = next(iter(args.values()), "") if args else ""
+                else:
+                    val = str(args)[:60]
+                if isinstance(val, str):
+                    val = val[:60] + "…" if len(val) > 60 else val
+                    lines.append(f"- {name}({val})")
+                else:
+                    lines.append(f"- {name}(...)")
+        return "\n".join(lines)
 
     async def _run_agent_loop(
         self,
@@ -203,7 +285,7 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         message_id: str | None = None,
-    ) -> tuple[str | None, list[str], list[dict]]:
+    ) -> tuple[str | None, list[str], list[dict], list[dict]]:
         """Run the agent iteration loop.
 
         *on_stream*: called with each content delta during streaming.
@@ -215,6 +297,9 @@ class AgentLoop:
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        all_tool_calls_log: list[dict] = []
+
+        FORCE_FINAL_THRESHOLD = max(1, self.max_iterations - 2)
 
         # Wrap on_stream with stateful think-tag filter so downstream
         # consumers (CLI, channels) never see <think> blocks.
@@ -273,6 +358,7 @@ class AgentLoop:
                 tool_call_dicts = [
                     tc.to_openai_tool_call()
                     for tc in response.tool_calls
+                    if tc.name
                 ]
                 messages = self.context.add_assistant_message(
                     messages, response.content, tool_call_dicts,
@@ -281,7 +367,10 @@ class AgentLoop:
                 )
 
                 for tc in response.tool_calls:
+                    if not tc.name:
+                        continue
                     tools_used.append(tc.name)
+                    all_tool_calls_log.append({"name": tc.name, "arguments": tc.arguments or {}})
                     args_str = json.dumps(tc.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tc.name, args_str[:200])
 
@@ -304,6 +393,15 @@ class AgentLoop:
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+
+                    if iteration >= FORCE_FINAL_THRESHOLD:
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "For research query, don't use any more tools. "
+                                "Provide your final answer now based on all the information gathered."
+                            )
+                        })
             else:
                 if on_stream and on_stream_end:
                     await on_stream_end(resuming=False)
@@ -328,7 +426,7 @@ class AgentLoop:
                 "without completing the task. You can try breaking the task into smaller steps."
             )
 
-        return final_content, tools_used, messages
+        return final_content, tools_used, messages, all_tool_calls_log
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
@@ -450,7 +548,7 @@ class AgentLoop:
                 current_message=msg.content, channel=channel, chat_id=chat_id,
                 current_role=current_role,
             )
-            final_content, _, all_msgs = await self._run_agent_loop(
+            final_content, _, all_msgs, _ = await self._run_agent_loop(
                 messages, channel=channel, chat_id=chat_id,
                 message_id=msg.metadata.get("message_id"),
             )
@@ -465,7 +563,6 @@ class AgentLoop:
 
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
-
         # Slash commands
         raw = msg.content.strip()
         ctx = CommandContext(msg=msg, session=session, key=key, raw=raw, loop=self)
@@ -473,7 +570,6 @@ class AgentLoop:
             return result
 
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
-
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
@@ -495,7 +591,7 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
-        final_content, _, all_msgs = await self._run_agent_loop(
+        final_content, _, all_msgs, tool_calls_log = await self._run_agent_loop(
             initial_messages,
             on_progress=on_progress or _bus_progress,
             on_stream=on_stream,
@@ -510,6 +606,13 @@ class AgentLoop:
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
         self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
+
+        if tool_calls_log:
+            tools_summary = self._build_tools_summary(tool_calls_log)
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content=tools_summary,
+                metadata={**(msg.metadata or {}), "_tools_summary": True},
+            ))
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None

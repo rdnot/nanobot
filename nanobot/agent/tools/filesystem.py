@@ -202,8 +202,7 @@ class WriteFileTool(_FsTool):
     def description(self) -> str:
         return (
             f"Write content to a file at the given path. Creates parent directories if needed. "
-            f"Content must not exceed {self._max_content_chars} characters. "
-            f"For larger files, write the initial content then append in chunks with edit_file."
+            f"Content must not exceed {self._max_content_chars:,} characters."
         )
 
     @property
@@ -214,10 +213,7 @@ class WriteFileTool(_FsTool):
                 "path": {"type": "string", "description": "The file path to write to"},
                 "content": {
                     "type": "string",
-                    "description": (
-                        f"The content to write. Must be under {self._max_content_chars} characters. "
-                        f"Use edit_file to append further chunks if needed."
-                    ),
+                    "description": f"The content to write. Must be under {self._max_content_chars:,} characters.",
                     "maxLength": self._max_content_chars,
                 },
             },
@@ -230,15 +226,10 @@ class WriteFileTool(_FsTool):
                 raise ValueError("Unknown path")
             if content is None:
                 raise ValueError("Unknown content")
-            if len(content) > self._max_content_chars:
-                return (
-                    f"Error: content is {len(content):,} chars, limit is {self._max_content_chars:,}. "
-                    f"Write the first chunk with write_file, then append the rest with edit_file."
-                )
             fp = self._resolve(path)
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(content, encoding="utf-8")
-            return f"Successfully wrote {len(content):,} bytes to {fp}"
+            return f"Successfully wrote {len(content)} bytes to {fp}"
         except PermissionError as e:
             return f"Error: {e}"
         except Exception as e:
@@ -304,8 +295,7 @@ class EditFileTool(_FsTool):
             "Edit a file by replacing old_text with new_text. "
             "Supports minor whitespace/line-ending differences. "
             "Set replace_all=true to replace every occurrence. "
-            f"new_text must not exceed {self._max_content_chars:,} characters; "
-            f"make multiple edit_file calls to apply larger changes in chunks."
+            f"new_text must not exceed {self._max_content_chars:,} characters."
         )
 
     @property
@@ -317,10 +307,7 @@ class EditFileTool(_FsTool):
                 "old_text": {"type": "string", "description": "The text to find and replace"},
                 "new_text": {
                     "type": "string",
-                    "description": (
-                        f"The text to replace with. Must be under {self._max_content_chars:,} characters. "
-                        f"Split into multiple edit_file calls if needed."
-                    ),
+                    "description": f"The text to replace with. Must be under {self._max_content_chars:,} characters.",
                     "maxLength": self._max_content_chars,
                 },
                 "replace_all": {
@@ -343,12 +330,6 @@ class EditFileTool(_FsTool):
                 raise ValueError("Unknown old_text")
             if new_text is None:
                 raise ValueError("Unknown new_text")
-            if len(new_text) > self._max_content_chars:
-                return (
-                    f"Error: new_text is {len(new_text):,} chars, limit is {self._max_content_chars:,}. "
-                    f"Split the replacement into multiple edit_file calls."
-                )
-
             fp = self._resolve(path)
             if not fp.exists():
                 return f"Error: File not found: {path}"

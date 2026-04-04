@@ -5,8 +5,10 @@ import mimetypes
 from pathlib import Path
 from typing import Any
 
-from nanobot.agent.tools.base import Tool
+from nanobot.agent.tools.base import Tool, tool_parameters
+from nanobot.agent.tools.schema import BooleanSchema, IntegerSchema, StringSchema, tool_parameters_schema
 from nanobot.utils.helpers import build_image_content_blocks, detect_image_mime
+from nanobot.config.paths import get_media_dir
 
 
 def _resolve_path(
@@ -21,7 +23,8 @@ def _resolve_path(
         p = workspace / p
     resolved = p.resolve()
     if allowed_dir:
-        all_dirs = [allowed_dir] + (extra_allowed_dirs or [])
+        media_path = get_media_dir().resolve()
+        all_dirs = [allowed_dir] + [media_path] + (extra_allowed_dirs or [])
         if not any(_is_under(resolved, d) for d in all_dirs):
             raise PermissionError(f"Path {path} is outside allowed directory {allowed_dir}")
     return resolved
@@ -56,11 +59,27 @@ class _FsTool(Tool):
 # read_file
 # ---------------------------------------------------------------------------
 
+@tool_parameters(
+    tool_parameters_schema(
+        path=StringSchema("The file path to read"),
+        offset=IntegerSchema(
+            1,
+            description="Line number to start reading from (1-indexed, default 1)",
+            minimum=1,
+        ),
+        limit=IntegerSchema(
+            8000,
+            description="Maximum number of lines to read (default 8000), recommend at least 300",
+            minimum=1,
+        ),
+        required=["path"],
+    )
+)
 class ReadFileTool(_FsTool):
     """Read file contents with optional line-based pagination."""
 
-    _MAX_CHARS = 768_000  # ~768 KB — ~192K tokens, fits within 256K-token context window
-    _DEFAULT_LIMIT = 8000
+    _MAX_CHARS = 768_000  # FORK: ~768 KB — ~192K tokens, fits within 256K-token context window
+    _DEFAULT_LIMIT = 8000  # FORK: increased from 2000
 
     @property
     def name(self) -> str:
@@ -76,26 +95,6 @@ class ReadFileTool(_FsTool):
     @property
     def read_only(self) -> bool:
         return True
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "The file path to read"},
-                "offset": {
-                    "type": "integer",
-                    "description": "Line number to start reading from (1-indexed, default 1)",
-                    "minimum": 1,
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Maximum number of lines to read (default 8000), recommend at least 300",
-                    "minimum": 1,
-                },
-            },
-            "required": ["path"],
-        }
 
     async def execute(self, path: str | None = None, offset: int = 1, limit: int | None = None, **kwargs: Any) -> Any:
         try:
@@ -158,12 +157,9 @@ class ReadFileTool(_FsTool):
 # write_file
 # ---------------------------------------------------------------------------
 
-# Conservative chars-per-token ratio. Actual ratio varies (code/ASCII skews higher,
-# CJK/emoji skews lower) but this keeps us safely within model output limits.
+# FORK: Conservative chars-per-token ratio for max_tokens-based size limiting.
 _CHARS_PER_TOKEN = 3
-# Headroom reserved for JSON wrapper, tool metadata, etc.
 _OVERHEAD_CHARS = 1_500
-# Floor so we never set a limit so low it becomes unusable.
 _MIN_CONTENT_CHARS = 4_000
 
 
@@ -172,7 +168,7 @@ def _max_content_chars_for_tokens(max_tokens: int) -> int:
 
 
 def _load_max_tokens_from_config() -> int | None:
-    """Return configured max_tokens, or None if unavailable. Raises on malformed config."""
+    """Return configured max_tokens, or None if unavailable."""
     from nanobot.config.loader import load_config  # local import to avoid circular deps
     config = load_config()
     return config.agents.defaults.max_tokens or None
@@ -181,7 +177,7 @@ def _load_max_tokens_from_config() -> int | None:
 class WriteFileTool(_FsTool):
     """Write content to a file, enforcing a size limit derived from the model's max_tokens."""
 
-    # Fallback when no max_tokens is available (matches a typical 4 096-token model).
+    # FORK: Fallback when no max_tokens is available.
     _DEFAULT_MAX_TOKENS = 4_096
 
     def __init__(
@@ -273,6 +269,7 @@ def _find_match(content: str, old_text: str) -> tuple[str | None, int]:
 class EditFileTool(_FsTool):
     """Edit a file by replacing text with fallback matching."""
 
+    # FORK: Fallback when no max_tokens is available.
     _DEFAULT_MAX_TOKENS = 4_096
 
     def __init__(
@@ -390,6 +387,18 @@ class EditFileTool(_FsTool):
 # list_dir
 # ---------------------------------------------------------------------------
 
+@tool_parameters(
+    tool_parameters_schema(
+        path=StringSchema("The directory path to list"),
+        recursive=BooleanSchema(description="Recursively list all files (default false)"),
+        max_entries=IntegerSchema(
+            200,
+            description="Maximum entries to return (default 200)",
+            minimum=1,
+        ),
+        required=["path"],
+    )
+)
 class ListDirTool(_FsTool):
     """List directory contents with optional recursion."""
 
@@ -415,25 +424,6 @@ class ListDirTool(_FsTool):
     @property
     def read_only(self) -> bool:
         return True
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "The directory path to list"},
-                "recursive": {
-                    "type": "boolean",
-                    "description": "Recursively list all files (default false)",
-                },
-                "max_entries": {
-                    "type": "integer",
-                    "description": "Maximum entries to return (default 200)",
-                    "minimum": 1,
-                },
-            },
-            "required": ["path"],
-        }
 
     async def execute(
         self, path: str | None = None, recursive: bool = False,

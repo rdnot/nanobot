@@ -13,7 +13,8 @@ from urllib.parse import urlparse
 import httpx
 from loguru import logger
 
-from nanobot.agent.tools.base import Tool
+from nanobot.agent.tools.base import Tool, tool_parameters
+from nanobot.agent.tools.schema import IntegerSchema, StringSchema, tool_parameters_schema
 
 if TYPE_CHECKING:
     from nanobot.config.schema import WebSearchConfig

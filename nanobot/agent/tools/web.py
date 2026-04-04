@@ -16,6 +16,7 @@ from loguru import logger
 from nanobot.agent.tools.base import Tool, tool_parameters
 from nanobot.agent.tools.schema import IntegerSchema, StringSchema, tool_parameters_schema
 
+
 if TYPE_CHECKING:
     from nanobot.config.schema import WebSearchConfig
 
@@ -243,19 +244,18 @@ def _readability_to_markdown(raw_html: str) -> str:
     return _normalize(_strip_tags(text))
 
 
+@tool_parameters(
+    tool_parameters_schema(
+        query=StringSchema("Search query"),
+        count=IntegerSchema(1, description="Results (1-10)", minimum=1, maximum=10),
+        required=["query"],
+    )
+)
 class WebSearchTool(Tool):
     """Search the web using configured provider."""
 
     name = "web_search"
     description = "Search the web. Returns titles, URLs, and snippets."
-    parameters = {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "Search query"},
-            "count": {"type": "integer", "description": "Results (1-10)", "minimum": 1, "maximum": 10},
-        },
-        "required": ["query"],
-    }
 
     def __init__(self, config: WebSearchConfig | None = None, proxy: str | None = None):
         from nanobot.config.schema import WebSearchConfig
@@ -399,6 +399,18 @@ class WebSearchTool(Tool):
             return f"Error: DuckDuckGo search failed ({e})"
 
 
+@tool_parameters(
+    tool_parameters_schema(
+        url=StringSchema("URL to fetch"),
+        extractMode={
+            "type": "string",
+            "enum": ["markdown", "text"],
+            "default": "markdown",
+        },
+        # maxChars disabled - uses default 500K
+        required=["url"],
+    )
+)
 class WebFetchTool(Tool):
     """
     Fetch and extract content from a URL.
@@ -409,15 +421,6 @@ class WebFetchTool(Tool):
 
     name = "web_fetch"
     description = "Fetch URL and extract readable content (HTML → markdown/text)."
-    parameters = {
-        "type": "object",
-        "properties": {
-            "url": {"type": "string", "description": "URL to fetch"},
-            "extractMode": {"type": "string", "enum": ["markdown", "text"], "default": "markdown"},
-            # "maxChars": {"type": "integer", "minimum": 100},  # Disabled - uses default 500K
-        },
-        "required": ["url"],
-    }
 
     def __init__(self, max_chars: int = 500000, proxy: str | None = None):
         self.max_chars = max_chars

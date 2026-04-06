@@ -297,7 +297,7 @@ class EditFileTool(_FsTool):
             "Edit a file by replacing old_text with new_text. "
             "Supports minor whitespace/line-ending differences. "
             "Set replace_all=true to replace every occurrence. "
-            f"new_text must not exceed {self._max_content_chars:,} characters."
+            f"new_text must not exceed {self._max_content_chars // 2:,} characters."
         )
 
     async def execute(

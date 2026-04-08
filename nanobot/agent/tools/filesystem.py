@@ -70,8 +70,8 @@ class _FsTool(Tool):
         ),
         limit=IntegerSchema(
             8000,
-            description="Maximum number of lines to read (default 8000), recommend at least 300",
-            minimum=1,
+            description="Maximum number of lines to read (default 8000), minimum 200",
+            minimum=200,
         ),
         required=["path"],
     )

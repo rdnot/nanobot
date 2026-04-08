@@ -223,6 +223,12 @@ class WriteFileTool(_FsTool):
                 raise ValueError("Unknown path")
             if content is None:
                 raise ValueError("Unknown content")
+            if len(content) > self._max_content_chars:
+                return (
+                    f"Error: content too large ({len(content):,} chars, limit {self._max_content_chars:,}). "
+                    "Write a skeleton file with section headings and '<!-- TODO -->' placeholders first, "
+                    "then expand each section using edit_file."
+                )
             fp = self._resolve(path)
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(content, encoding="utf-8")

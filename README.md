@@ -33,8 +33,8 @@ A real-world example system prompt for a medical research use case is available 
 📄 [`medical-research_example-system-prompt/example-system-prompt.md`](medical-research_example-system-prompt/example-system-prompt.md)
 
 ## Example Research Prompt
-Comprehensive research about pneumonia in ER , fetch as least 10 up-to-date, evidence-based and reliable sources or guidelines, make it into .md file in /workspace folder, write 2000 words first then edit for more contents.
-Result : structured .md file (7000 words, 50KB size, 28 tool calls)
+ - Comprehensive research about pneumonia in ER , fetch as least 10 up-to-date, evidence-based and reliable sources or guidelines, make it into .md file in /workspace folder, write 2000 words first then edit for more contents.
+ - Result : structured .md file (7000 words, 50KB size, 28 tool calls)
 
 ## Third-Party Licenses
 This fork introduces the following additional dependencies beyond the original nanobot project:

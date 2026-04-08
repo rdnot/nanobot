@@ -161,7 +161,7 @@ class ReadFileTool(_FsTool):
 # ---------------------------------------------------------------------------
 
 # FORK: Conservative chars-per-token ratio for max_tokens-based size limiting.
-_CHARS_PER_TOKEN = 3
+_CHARS_PER_TOKEN = 2
 _OVERHEAD_CHARS = 1_500
 _MIN_CONTENT_CHARS = 4_000
 

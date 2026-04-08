@@ -59,6 +59,7 @@ class _FsTool(Tool):
 # read_file
 # ---------------------------------------------------------------------------
 
+
 @tool_parameters(
     tool_parameters_schema(
         path=StringSchema("The file path to read"),
@@ -88,8 +89,10 @@ class ReadFileTool(_FsTool):
     @property
     def description(self) -> str:
         return (
-            "Read the contents of a file. Returns numbered lines. "
-            "Use offset and limit to paginate through large files."
+            "Read a text file. Output format: LINE_NUM|CONTENT. "
+            "Use offset and limit for large files. "
+            "Cannot read binary files or images. "
+            "Reads exceeding ~768K chars are truncated."
         )
 
     @property
@@ -208,7 +211,9 @@ class WriteFileTool(_FsTool):
     @property
     def description(self) -> str:
         return (
-            f"Write content to a file at the given path. Creates parent directories if needed. "
+            "Write content to a file. Overwrites if the file already exists; "
+            "creates parent directories as needed. "
+            "For partial edits, prefer edit_file instead. "
             f"Content must not exceed {self._max_content_chars:,} characters."
         )
 
@@ -221,7 +226,7 @@ class WriteFileTool(_FsTool):
             fp = self._resolve(path)
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(content, encoding="utf-8")
-            return f"Successfully wrote {len(content)} bytes to {fp}"
+            return f"Successfully wrote {len(content)} characters to {fp}"
         except PermissionError as e:
             return f"Error: {e}"
         except Exception as e:
@@ -295,8 +300,9 @@ class EditFileTool(_FsTool):
     def description(self) -> str:
         return (
             "Edit a file by replacing old_text with new_text. "
-            "Supports minor whitespace/line-ending differences. "
-            "Set replace_all=true to replace every occurrence. "
+            "Tolerates minor whitespace/indentation differences. "
+            "If old_text matches multiple times, you must provide more context "
+            "or set replace_all=true. Shows a diff of the closest match on failure. "
             f"new_text must not exceed {self._max_content_chars // 2:,} characters."
         )
 
@@ -312,6 +318,7 @@ class EditFileTool(_FsTool):
                 raise ValueError("Unknown old_text")
             if new_text is None:
                 raise ValueError("Unknown new_text")
+
             fp = self._resolve(path)
             if not fp.exists():
                 return f"Error: File not found: {path}"

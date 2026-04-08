@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import os
 import time
 from contextlib import AsyncExitStack, nullcontext
@@ -36,9 +35,14 @@ from nanobot.session.manager import Session, SessionManager
 from nanobot.utils.helpers import image_placeholder_text, truncate_text
 from nanobot.utils.runtime import EMPTY_FINAL_RESPONSE_MESSAGE
 
+# UPSTREAM: import the new tool_hints utility
+from nanobot.utils.tool_hints import format_tool_hints
+
 if TYPE_CHECKING:
     from nanobot.config.schema import ChannelsConfig, ExecToolConfig, WebToolsConfig
     from nanobot.cron.service import CronService
+
+# NOTE: `re` import removed — upstream dropped it; _tool_hint now delegates to tool_hints module.
 
 
 class _LoopHook(AgentHook):
@@ -350,23 +354,30 @@ class AgentLoop:
 
     @staticmethod
     def _tool_hint(tool_calls: list) -> str:
-        """Format tool calls as concise hint, e.g. 'web_search(\"query\")'."""
-        def _fmt(tc):
-            # FORK: Enhanced formatting for web_search and web_fetch
+        """Format tool calls as concise hints with smart abbreviation.
+
+        FORK: web_search and web_fetch get custom display labels (search/fetch).
+        All other tools are handled by upstream's format_tool_hints utility,
+        which uses abbreviate_path and groups consecutive identical calls.
+        """
+        # Patch web_search/web_fetch names for display before delegating
+        class _PatchedTC:
+            """Thin wrapper that overrides .name for display purposes only."""
+            __slots__ = ("_tc", "name", "arguments")
+            def __init__(self, tc, name_override: str) -> None:
+                self._tc = tc
+                self.name = name_override
+                self.arguments = tc.arguments
+
+        patched = []
+        for tc in tool_calls:
             if tc.name == "web_search":
-                val = tc.arguments.get("query", "") if tc.arguments else ""
-                val = val[:40] + "…" if len(val) > 40 else val
-                return f'search("{val}")'
+                patched.append(_PatchedTC(tc, "web_search"))  # kept as-is; format_tool_hints knows it
             elif tc.name in ("web_fetch", "fetch"):
-                url = tc.arguments.get("url", "") if tc.arguments else ""
-                return f'fetch("{url}")'
+                patched.append(_PatchedTC(tc, "web_fetch"))   # normalise "fetch" alias
             else:
-                args = (tc.arguments[0] if isinstance(tc.arguments, list) else tc.arguments) or {}
-                val = next(iter(args.values()), None) if isinstance(args, dict) else None
-                if not isinstance(val, str):
-                    return tc.name
-                return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
-        return ", ".join(_fmt(tc) for tc in tool_calls)
+                patched.append(tc)
+        return format_tool_hints(patched)
 
     @staticmethod
     def _build_tools_summary(all_tool_calls: list[dict]) -> str:
@@ -523,8 +534,6 @@ class AgentLoop:
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
-                # Preserve real task cancellation so shutdown can complete cleanly.
-                # Only ignore non-task CancelledError signals that may leak from integrations.
                 if not self._running or asyncio.current_task().cancelling():
                     raise
                 continue
@@ -551,7 +560,6 @@ class AgentLoop:
             try:
                 on_stream = on_stream_end = None
                 if msg.metadata.get("_wants_stream"):
-                    # Split one answer into distinct stream segments.
                     stream_base_id = f"{msg.session_key}:{time.time_ns()}"
                     stream_segment = 0
 
@@ -610,7 +618,7 @@ class AgentLoop:
             try:
                 await self._mcp_stack.aclose()
             except (RuntimeError, BaseExceptionGroup):
-                pass  # MCP SDK cancel scope cleanup is noisy but harmless
+                pass
             self._mcp_stack = None
 
     def _schedule_background(self, coro) -> None:
@@ -789,7 +797,7 @@ class AgentLoop:
             entry = dict(m)
             role, content = entry.get("role"), entry.get("content")
             if role == "assistant" and not content and not entry.get("tool_calls"):
-                continue  # skip empty assistant messages — they poison session context
+                continue
             if role == "tool":
                 if isinstance(content, str) and len(content) > self.max_tool_result_chars:
                     entry["content"] = truncate_text(content, self.max_tool_result_chars)
@@ -800,7 +808,6 @@ class AgentLoop:
                     entry["content"] = filtered
             elif role == "user":
                 if isinstance(content, str) and content.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
-                    # Strip the runtime-context prefix, keep only the user text.
                     parts = content.split("\n\n", 1)
                     if len(parts) > 1 and parts[1].strip():
                         entry["content"] = parts[1]

@@ -32,7 +32,7 @@
   - ReadFileTool._DEFAULT_LIMIT = 8,000
   - max_tool_result_chars: 400_000 → Prevents large tool results from being offloaded to .nanobot/tool-results/
   - _CHAT_RETRY_DELAYS = (1, 2, 4, 8, 16) → Increased LLM API retries from 3 to 5 attempts
-  - Write_File & Edit_File Tools: add char limits based on model's output `max_tokens` config (default=4096), `max_tokens × 2 - 1500` for write, `(max_tokens × 2 - 1500)/2` for edit.
+  - Write_File & Edit_File Tools: add char limits based on model's output `max_tokens` config (default=4096), `max_tokens × 3 - 1500` for write, `(max_tokens × 3 - 1500)/2` for edit.
 
 ## Example System Prompt
 A real-world example system prompt for a medical research use case is available here:  
@@ -1576,6 +1576,32 @@ This affects runtime time strings shown to the model, such as runtime context an
 Common examples: `UTC`, `America/New_York`, `America/Los_Angeles`, `Europe/London`, `Europe/Berlin`, `Asia/Tokyo`, `Asia/Shanghai`, `Asia/Singapore`, `Australia/Sydney`.
 
 > Need another timezone? Browse the full [IANA Time Zone Database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones).
+
+### Unified Session
+
+By default, each channel × chat ID combination gets its own session. If you use nanobot across multiple channels (e.g. Telegram + Discord + CLI) and want them to share the same conversation, enable `unifiedSession`:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "unifiedSession": true
+    }
+  }
+}
+```
+
+When enabled, all incoming messages — regardless of which channel they arrive on — are routed into a single shared session. Switching from Telegram to Discord (or any other channel) continues the same conversation seamlessly.
+
+| Behavior | `false` (default) | `true` |
+|----------|-------------------|--------|
+| Session key | `channel:chat_id` | `unified:default` |
+| Cross-channel continuity | No | Yes |
+| `/new` clears | Current channel session | Shared session |
+| `/stop` finds tasks | By channel session | By shared session |
+| Existing `session_key_override` (e.g. Telegram thread) | Respected | Still respected — not overwritten |
+
+> This is designed for single-user, multi-device setups. It is **off by default** — existing users see zero behavior change.
 
 ## 🧩 Multiple Instances
 

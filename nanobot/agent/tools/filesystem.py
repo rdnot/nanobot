@@ -161,7 +161,7 @@ class ReadFileTool(_FsTool):
 # ---------------------------------------------------------------------------
 
 # FORK: Conservative chars-per-token ratio for max_tokens-based size limiting.
-_CHARS_PER_TOKEN = 2
+_CHARS_PER_TOKEN = 3
 _OVERHEAD_CHARS = 1_500
 _MIN_CONTENT_CHARS = 4_000
 
@@ -324,7 +324,7 @@ class EditFileTool(_FsTool):
                 raise ValueError("Unknown old_text")
             if new_text is None:
                 raise ValueError("Unknown new_text")
-            if len(new_text) > self._max_content_chars // 2:
+            if len(new_text) > self._max_content_chars:
                 return (
                     f"Error: new_text too large ({len(new_text):,} chars, limit {self._max_content_chars // 2:,}). "
                     "Split into smaller edit_file calls, one section at a time."

@@ -32,11 +32,12 @@ pip install PyMuPDF curl_cffi trafilatura
 ```
 
 ## Last Verified
-- **Date:** April 15, 2026
-- **Upstream version:** e18eab8 (main, post v0.1.5.post1)
-- **Merge commit:** f082868
-- **Verification status:** ✅ Passed (all fork customizations intact, 23 FORK markers)
-- **Test status:** 41 passed, 3 failed (test_retry — expected: fork uses 5 retries vs upstream 3-4)
+- **Date:** April 16, 2026
+- **Upstream version:** 90b7d94 (main) — feat: SelfTool, refactor: MyTool config nesting
+- **Merge commit:** fd4cc41
+- **Verification status:** ✅ Passed (all 12 fork customizations intact, 6-tuple return preserved)
+- **Test status:** 1831 passed, 3 skipped — all tests passing
+- **Merge notes:** Clean merge, no conflicts. New upstream features: SelfTool (439 lines), MY_TOOL docs, config schema updates.
 
 ## Merge Notes
 

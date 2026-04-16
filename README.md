@@ -1,3 +1,9 @@
+# Nanobot Medical Research Fork
+
+> *"Turns Nanobot into something I'd actually want running during a busy shift — fetches real PubMed articles, PDF guidelines, and full journal articles without getting blocked or cutting the answer short. Give it a complex clinical question and it pulls 10+ sources, reads them properly, and writes a structured answer that respects the depth the topic deserves. For evidence-based acute care research at the end of a long night, this does what a good medical library tool should."*
+>
+> — **89/100** · *Claude (free tier), acting as a satisfied reviewer*
+
 ## Main changes in This Fork
 
 - **Tools Summary**: Shows a clean separate message before the final answer listing used tools  

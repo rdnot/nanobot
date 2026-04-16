@@ -1,8 +1,15 @@
 ## Main changes in This Branch
 
 - **feat(web_fetch): add scrapling browser tier between curl_cffi and httpx fallback** : Manage JS-rendered pages / Cloudflare
+ > install required dependencies (curl_cffi, scrapling, scrapling[fetchers], trafilatura, markdownify, PyMuPDF(optional)) then install the browser dependencies with `scrapling install`)
 
 ---
+
+# Nanobot Medical Research Fork
+
+> *"Turns Nanobot into something I'd actually want running during a busy shift — fetches real PubMed articles, PDF guidelines, and full journal articles without getting blocked or cutting the answer short. Give it a complex clinical question and it pulls 10+ sources, reads them properly, and writes a structured answer that respects the depth the topic deserves. For evidence-based acute care research at the end of a long night, this does what a good medical library tool should."*
+>
+> — **89/100** · *Claude (free tier), acting as a satisfied reviewer*
 
 ## Main changes in This Fork
 
@@ -16,6 +23,8 @@
 - **Privacy-Focused Search**: Hardcoded SearXNG override: `DEFAULT_SEARXNG_URL` forces SearXNG provider when set in web.py, falls back to config provider
 
 - **Loop Control**: `FORCE_FINAL_THRESHOLD = max_iterations - 2` — Forces final answer after [max_iterations - 2] iterations (default max_iterations = 200, unless specify in config `maxToolIterations`) to prevent infinite tool loops
+
+- **SelfTool Opt-in**: The `my` skill (runtime self-inspection) is now **opt-in** (`always: false`) instead of always-on. The skill remains available — the agent will discover it in the skills summary and load it on-demand when needed (e.g., diagnosing issues, checking token usage). This reduces tool call overhead for users who don't need frequent self-inspection.
 
 - **WhatsApp Channel**: Enhanced message markdown rendering for WhatsApp integration
 
@@ -342,6 +351,7 @@ Connect nanobot to your favorite chat platform. Want to build your own? See the 
 | **Email** | IMAP/SMTP credentials |
 | **QQ** | App ID + App Secret |
 | **Wecom** | Bot ID + Bot Secret |
+| **Microsoft Teams** | App ID + App Password + public HTTPS endpoint |
 | **Mochat** | Claw token (auto-setup available) |
 
 <details>
@@ -918,6 +928,56 @@ Go to the WeCom admin console → Intelligent Robot → Create Robot → select 
   }
 }
 ```
+
+**4. Run**
+
+```bash
+nanobot gateway
+```
+
+</details>
+
+<details>
+<summary><b>Microsoft Teams</b> (MVP — DM only)</summary>
+
+> Direct-message text in/out, tenant-aware OAuth, conversation reference persistence.
+> Uses a public HTTPS webhook — no WebSocket; you need a tunnel or reverse proxy.
+
+**1. Install the optional dependency**
+
+```bash
+pip install nanobot-ai[msteams]
+```
+
+**2. Create a Teams / Azure bot app registration**
+
+Create or reuse a Microsoft Teams / Azure bot app registration. Set the bot messaging endpoint to a public HTTPS URL ending in `/api/messages`.
+
+**3. Configure**
+
+```json
+{
+  "channels": {
+    "msteams": {
+      "enabled": true,
+      "appId": "YOUR_APP_ID",
+      "appPassword": "YOUR_APP_SECRET",
+      "tenantId": "YOUR_TENANT_ID",
+      "host": "0.0.0.0",
+      "port": 3978,
+      "path": "/api/messages",
+      "allowFrom": ["*"],
+      "replyInThread": true,
+      "mentionOnlyResponse": "Hi — what can I help with?",
+      "validateInboundAuth": true
+    }
+  }
+}
+```
+
+> - `replyInThread: true` replies to the triggering Teams activity when a stored `activity_id` is available.
+> - `mentionOnlyResponse` controls what Nanobot receives when a user sends only a bot mention (`<at>Nanobot</at>`). Set to `""` to ignore mention-only messages.
+> - `validateInboundAuth: true` enables inbound Bot Framework bearer-token validation (signature, issuer, audience, lifetime, `serviceUrl`). This is the safe default for public deployments. Only set it to `false` for local development or tightly controlled testing.
 
 **4. Run**
 

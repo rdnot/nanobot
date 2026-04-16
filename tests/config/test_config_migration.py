@@ -34,7 +34,7 @@ def test_load_config_keeps_max_tokens_and_ignores_legacy_memory_window(tmp_path)
     config = load_config(config_path)
 
     assert config.agents.defaults.max_tokens == 1234
-    assert config.agents.defaults.context_window_tokens == 65_536
+    assert config.agents.defaults.context_window_tokens == 200_000
     assert not hasattr(config.agents.defaults, "memory_window")
 
 
@@ -60,7 +60,7 @@ def test_save_config_writes_context_window_tokens_but_not_memory_window(tmp_path
     defaults = saved["agents"]["defaults"]
 
     assert defaults["maxTokens"] == 2222
-    assert defaults["contextWindowTokens"] == 65_536
+    assert defaults["contextWindowTokens"] == 200_000
     assert "memoryWindow" not in defaults
 
 
@@ -138,6 +138,71 @@ def test_onboard_refresh_backfills_missing_channel_fields(tmp_path, monkeypatch)
     assert result.exit_code == 0
     saved = json.loads(config_path.read_text(encoding="utf-8"))
     assert saved["channels"]["qq"]["msgFormat"] == "plain"
+
+
+def test_load_config_migrates_legacy_my_tool_keys(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "tools": {
+                    "myEnabled": False,
+                    "mySet": True,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.tools.my.enable is False
+    assert config.tools.my.allow_set is True
+
+
+def test_save_config_rewrites_legacy_my_tool_keys(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "tools": {
+                    "myEnabled": False,
+                    "mySet": True,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+    save_config(config, config_path)
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+
+    tools = saved["tools"]
+    assert "myEnabled" not in tools
+    assert "mySet" not in tools
+    assert tools["my"] == {"enable": False, "allowSet": True}
+
+
+def test_new_my_tool_keys_take_precedence_over_legacy(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "tools": {
+                    "myEnabled": False,
+                    "mySet": False,
+                    "my": {"enable": True, "allowSet": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.tools.my.enable is True
+    assert config.tools.my.allow_set is True
 
 
 def test_load_config_resets_ssrf_whitelist_when_next_config_is_empty(tmp_path) -> None:
